@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import QRCode from 'qrcode';
-import { api, ApiError, clearSession, readSession, saveSession, type Employee, type MealPeriod, type PaymentToken, type Session, type Transaction } from './api';
+import { api, ApiError, clearSession, readSession, saveSession, type Employee, type MealPeriod, type Session, type Transaction } from './api';
+import PaymentCode from './PaymentCode';
 import { Icon, type IconName } from './icons';
 
 const A = '/assets/ui/';
@@ -197,70 +197,6 @@ function Home({ employee, balance, ledger, meals, setPage, refresh, refreshMeals
     <section className="surface recent-section"><div className="section-heading"><h2>最近资金流水</h2><button className="text-button" type="button" onClick={() => setPage('ledger')}>查看全部 <Icon name="arrow" size={18}/></button></div>
       {ledger.phase === 'loading' || ledger.phase === 'idle' ? <Loading text="正在读取资金记录"/> : ledger.phase === 'error' ? <Notice title="资金记录暂不可用" action={<button className="outline-button" type="button" onClick={refresh}>重试</button>}>{ledger.message}</Notice> : ledger.items.length ? <TransactionRows items={ledger.items.slice(0, 2)}/> : <Notice title="暂无资金流水">充值或消费后，记录会显示在这里。</Notice>}
     </section>
-  </div>;
-}
-
-function PaymentCode({ session, employee, onExpired, onForced }: { session: Session; employee: Employee; onExpired: () => void; onForced: () => void }) {
-  const [token, setToken] = useState<PaymentToken | null>(null);
-  const [qrData, setQrData] = useState('');
-  const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
-  const [message, setMessage] = useState('');
-  const [seconds, setSeconds] = useState(0);
-  const active = useRef(true);
-  const generation = useRef(0);
-  const refreshing = useRef(false);
-  const nextRetry = useRef<number | null>(null);
-
-  const issue = useCallback(async () => {
-    if (refreshing.current) return;
-    refreshing.current = true;
-    const current = ++generation.current;
-    if (!token || Date.parse(token.expires_at) <= Date.now()) setPhase('loading');
-    try {
-      const issued = await api.paymentToken(session);
-      const data = await QRCode.toDataURL(issued.token, { errorCorrectionLevel: 'M', margin: 2, width: 320, color: { dark: '#17324D', light: '#FFFFFF' } });
-      if (!active.current || current !== generation.current) return;
-      setToken(issued);
-      setQrData(data);
-      setPhase('ready');
-      setMessage('');
-      nextRetry.current = null;
-    } catch (reason) {
-      if (!active.current || current !== generation.current) return;
-      if (reason instanceof ApiError && reason.status === 401) { onExpired(); return; }
-      if (reason instanceof ApiError && reason.code === 'PASSWORD_CHANGE_REQUIRED') { onForced(); return; }
-      if (reason instanceof ApiError && reason.code === 'REFRESH_TOO_SOON') {
-        nextRetry.current = reason.refreshAfter ? Date.parse(reason.refreshAfter) : Date.now() + 5000;
-        if (!token || Date.parse(token.expires_at) <= Date.now()) setPhase('loading');
-      }
-      setMessage(messageFor(reason));
-      if (reason instanceof ApiError && reason.code !== 'REFRESH_TOO_SOON' && (!token || Date.parse(token.expires_at) <= Date.now())) setPhase('error');
-      else if (!(reason instanceof ApiError) && (!token || Date.parse(token.expires_at) <= Date.now())) setPhase('error');
-    } finally { refreshing.current = false; }
-  }, [session, token, onExpired, onForced]);
-
-  useEffect(() => { active.current = true; void issue(); return () => { active.current = false; generation.current++; }; }, [session.access_token]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (!active.current) return;
-      const now = Date.now();
-      if (token && now >= Date.parse(token.expires_at)) { setQrData(''); setPhase('loading'); }
-      const target = token ? Math.max(Date.parse(token.refresh_after), nextRetry.current || 0) : nextRetry.current;
-      setSeconds(target ? Math.max(0, Math.ceil((target - now) / 1000)) : 0);
-      if (document.visibilityState === 'visible' && target && now >= target && !refreshing.current) void issue();
-    }, 1000);
-    const visible = () => { if (document.visibilityState === 'visible' && (!token || Date.now() >= Math.max(Date.parse(token.refresh_after), nextRetry.current || 0))) void issue(); };
-    document.addEventListener('visibilitychange', visible);
-    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', visible); };
-  }, [token, issue]);
-
-  return <div className="page qr-page"><header className="page-heading"><h1>我的就餐码</h1><p>在食堂终端前出示动态码</p></header>
-    <section className="surface code-card"><div className="code-top"><Status status={employee.account_status}/><span>动态更新</span></div>
-      {phase === 'ready' && qrData && token && Date.now() < Date.parse(token.expires_at) ? <><img className="real-qr" src={qrData} alt="可供食堂扫码枪读取的动态就餐码"/><h2>{employee.name}</h2><p>请将屏幕对准扫码枪</p><div className="refresh-line"><span><Icon name="clock" size={20}/> {seconds > 0 ? `${seconds} 秒后更新` : '正在更新'}</span><button type="button" onClick={() => void issue()} disabled={seconds > 0}><Icon name="refresh" size={20}/> 刷新</button></div></> : phase === 'loading' ? <Loading text={nextRetry.current && seconds > 0 ? `请等待 ${seconds} 秒后自动获取就餐码` : '正在获取就餐码'}/> : <Notice title="暂时无法获取就餐码" action={<button className="outline-button" type="button" onClick={() => void issue()}>重试</button>}>{message}</Notice>}
-      {message && phase === 'ready' && <div className="alert alert-warn" role="status">{message}</div>}
-    </section>
-    <section className="surface qr-help"><img src={`${A}phone-qr-illustration.png`} alt="手机出示就餐码插画"/><div><h2>使用就餐码</h2><p>打开手机屏幕，让食堂扫码枪读取上方动态码。核销成功后，余额和资金流水会更新。</p></div></section>
   </div>;
 }
 

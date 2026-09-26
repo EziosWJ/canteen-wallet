@@ -22,15 +22,21 @@ import (
 )
 
 type result struct {
-	Status        string     `json:"status"`
-	Code          string     `json:"code"`
-	Message       string     `json:"message"`
-	EmployeeName  string     `json:"employee_name,omitempty"`
-	MealCode      string     `json:"meal_code,omitempty"`
-	AmountCents   int64      `json:"amount_cents,omitempty"`
-	TransactionID int64      `json:"transaction_id,omitempty"`
-	PendingID     string     `json:"pending_id,omitempty"`
-	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	Status           string     `json:"status"`
+	Code             string     `json:"code"`
+	Message          string     `json:"message"`
+	EmployeeName     string     `json:"employee_name,omitempty"`
+	MealCode         string     `json:"meal_code,omitempty"`
+	MealName         string     `json:"meal_name,omitempty"`
+	AmountCents      int64      `json:"amount_cents,omitempty"`
+	TransactionID    int64      `json:"transaction_id,omitempty"`
+	TransactionNo    string     `json:"transaction_no,omitempty"`
+	ConsumptionNo    string     `json:"consumption_no,omitempty"`
+	OccurredAt       string     `json:"occurred_at,omitempty"`
+	PendingID        string     `json:"pending_id,omitempty"`
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	Replayed         bool       `json:"replayed,omitempty"`
+	DuplicateTrigger bool       `json:"duplicate_trigger,omitempty"`
 }
 type event struct {
 	ID         int64  `json:"id"`
@@ -53,6 +59,8 @@ type agent struct {
 	client                             *http.Client
 	internal, credential, voiceCommand string
 	logger                             *slog.Logger
+	watching                           map[string]bool
+	pendingDisplayID                   string
 }
 
 func main() {
@@ -86,7 +94,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	a := &agent{client: &http.Client{Timeout: 4 * time.Second}, internal: strings.TrimRight(internal, "/"), credential: credential, voiceCommand: os.Getenv("CANTEEN_TTS_COMMAND"), logger: logger, state: displayState{Status: "WAITING", ScannerStatus: "OFFLINE", DatabaseStatus: "UNKNOWN", VoiceStatus: "UNAVAILABLE", Events: make([]event, 0)}}
+	a := &agent{client: &http.Client{Timeout: 4 * time.Second}, internal: strings.TrimRight(internal, "/"), credential: credential, voiceCommand: os.Getenv("CANTEEN_TTS_COMMAND"), logger: logger, watching: make(map[string]bool), state: displayState{Status: "WAITING", ScannerStatus: "OFFLINE", DatabaseStatus: "UNKNOWN", VoiceStatus: "UNAVAILABLE", Events: make([]event, 0)}}
 	if a.voiceCommand != "" {
 		a.state.VoiceStatus = "READY"
 	}
@@ -94,6 +102,7 @@ func run(logger *slog.Logger) error {
 	defer cancel()
 	go a.readScanner(ctx, device)
 	go a.heartbeat(ctx)
+	go a.resumePending(ctx)
 	proxy := httputil.NewSingleHostReverseProxy(publicURL)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/display/state", func(w http.ResponseWriter, r *http.Request) {
@@ -104,40 +113,6 @@ func run(logger *slog.Logger) error {
 			w.WriteHeader(405)
 			return
 		}
-		a.Lock()
-		snapshot := a.state
-		a.Unlock()
-		jsonResponse(w, snapshot)
-	})
-	mux.HandleFunc("/api/display/confirm", func(w http.ResponseWriter, r *http.Request) {
-		if !localRequest(w, r) {
-			return
-		}
-		if r.Method != http.MethodPost {
-			w.WriteHeader(405)
-			return
-		}
-		var input struct {
-			PendingID string `json:"pending_id"`
-		}
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&input) != nil {
-			http.Error(w, "invalid request", 400)
-			return
-		}
-		a.Lock()
-		expected := a.state.Result.PendingID
-		a.Unlock()
-		if input.PendingID == "" || input.PendingID != expected {
-			http.Error(w, "pending request unavailable", 409)
-			return
-		}
-		result, err := a.send(r.Context(), "confirm", map[string]string{"pending_id": input.PendingID})
-		if err != nil {
-			a.setOffline()
-			http.Error(w, "backend unavailable", 503)
-			return
-		}
-		a.setResult(result)
 		a.Lock()
 		snapshot := a.state
 		a.Unlock()
@@ -326,6 +301,129 @@ func (a *agent) processScan(ctx context.Context, token string) {
 	a.setResult(result)
 }
 
+func (a *agent) getPending(ctx context.Context, id string) (result, error) {
+	endpoint := a.internal + "/api/v1/terminal/pending"
+	if id != "" {
+		endpoint += "/" + url.PathEscape(id)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return result{}, err
+	}
+	request.Header.Set("Authorization", "Bearer "+a.credential)
+	response, err := a.client.Do(request)
+	if err != nil {
+		return result{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return result{}, os.ErrNotExist
+	}
+	if response.StatusCode != http.StatusOK {
+		return result{}, fmt.Errorf("backend status %d", response.StatusCode)
+	}
+	var reply result
+	if err := json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&reply); err != nil {
+		return result{}, err
+	}
+	return reply, nil
+}
+
+func (a *agent) resumePending(ctx context.Context) {
+	for ctx.Err() == nil {
+		values, err := a.getRecentPending(ctx)
+		if err == nil {
+			for _, value := range values {
+				if value.Status == "PENDING" && value.PendingID != "" {
+					go a.watchPending(ctx, value.PendingID)
+				}
+			}
+			if len(values) > 0 {
+				a.Lock()
+				waiting := a.state.Status == "WAITING"
+				a.Unlock()
+				if waiting {
+					value := values[0]
+					value.Replayed = true
+					a.setResult(value)
+				}
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func (a *agent) getRecentPending(ctx context.Context) ([]result, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, a.internal+"/api/v1/terminal/pending/recent", nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+a.credential)
+	response, err := a.client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("backend status %d", response.StatusCode)
+	}
+	var reply struct {
+		Items []result `json:"items"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 65536)).Decode(&reply); err != nil {
+		return nil, err
+	}
+	return reply.Items, nil
+}
+
+func (a *agent) watchPending(ctx context.Context, id string) {
+	a.Lock()
+	if a.watching[id] {
+		a.Unlock()
+		return
+	}
+	a.watching[id] = true
+	a.Unlock()
+	defer func() { a.Lock(); delete(a.watching, id); a.Unlock() }()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		value, err := a.getPending(ctx, id)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				a.setOffline()
+				continue
+			}
+			return
+		}
+		if value.Status != "PENDING" {
+			a.Lock()
+			current := a.pendingDisplayID == id
+			if !current {
+				a.state.Events = append([]event{{ResultCode: value.Code, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}}, a.state.Events...)
+				if len(a.state.Events) > 20 {
+					a.state.Events = a.state.Events[:20]
+				}
+			}
+			a.Unlock()
+			if current {
+				a.setResult(value)
+			}
+			return
+		}
+	}
+}
+
 func (a *agent) send(ctx context.Context, action string, payload any) (result, error) {
 	body, _ := json.Marshal(payload)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, a.internal+"/api/v1/terminal/"+action, bytes.NewReader(body))
@@ -399,6 +497,11 @@ func (a *agent) setResult(value result) {
 	a.Lock()
 	a.sequence++
 	current := a.sequence
+	if value.Status == "PENDING" {
+		a.pendingDisplayID = value.PendingID
+	} else {
+		a.pendingDisplayID = ""
+	}
 	a.state.Status = value.Status
 	a.state.Result = value
 	a.state.Events = append([]event{{ResultCode: value.Code, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}}, a.state.Events...)
@@ -406,6 +509,9 @@ func (a *agent) setResult(value result) {
 		a.state.Events = a.state.Events[:20]
 	}
 	a.Unlock()
+	if value.Status == "PENDING" && value.PendingID != "" {
+		go a.watchPending(context.Background(), value.PendingID)
+	}
 	delay := 5 * time.Second
 	if value.Status == "PENDING" && value.ExpiresAt != nil {
 		delay = time.Until(*value.ExpiresAt)
@@ -423,7 +529,7 @@ func (a *agent) setResult(value result) {
 			a.Unlock()
 		})
 	}
-	if a.voiceCommand != "" && value.Message != "" {
+	if a.voiceCommand != "" && value.Message != "" && !value.Replayed && !value.DuplicateTrigger {
 		go func() {
 			command := exec.Command(a.voiceCommand, value.Message)
 			if err := command.Run(); err != nil {

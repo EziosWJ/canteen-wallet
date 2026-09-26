@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -19,7 +20,8 @@ import (
 
 var ErrUnauthorized = errors.New("terminal credential invalid")
 var ErrInvalidRequest = errors.New("invalid terminal request")
-var ErrPendingExpired = errors.New("pending consumption expired")
+var ErrNotFound = errors.New("payment state not found")
+var ErrEmployeeSessionInvalid = errors.New("employee session invalid")
 
 type Service struct {
 	db       *sql.DB
@@ -32,16 +34,21 @@ func New(db *sql.DB, mealService *meals.Service, location *time.Location) *Servi
 }
 
 type Result struct {
-	Status        string     `json:"status"`
-	Code          string     `json:"code"`
-	Message       string     `json:"message"`
-	EmployeeName  string     `json:"employee_name,omitempty"`
-	MealCode      string     `json:"meal_code,omitempty"`
-	AmountCents   int64      `json:"amount_cents,omitempty"`
-	TransactionID int64      `json:"transaction_id,omitempty"`
-	PendingID     string     `json:"pending_id,omitempty"`
-	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
-	Replayed      bool       `json:"replayed,omitempty"`
+	Status           string     `json:"status"`
+	Code             string     `json:"code"`
+	Message          string     `json:"message"`
+	EmployeeName     string     `json:"employee_name,omitempty"`
+	MealCode         string     `json:"meal_code,omitempty"`
+	MealName         string     `json:"meal_name,omitempty"`
+	AmountCents      int64      `json:"amount_cents,omitempty"`
+	TransactionID    int64      `json:"transaction_id,omitempty"`
+	TransactionNo    string     `json:"transaction_no,omitempty"`
+	ConsumptionNo    string     `json:"consumption_no,omitempty"`
+	OccurredAt       string     `json:"occurred_at,omitempty"`
+	PendingID        string     `json:"pending_id,omitempty"`
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	Replayed         bool       `json:"replayed,omitempty"`
+	DuplicateTrigger bool       `json:"duplicate_trigger,omitempty"`
 }
 
 type Event struct {
@@ -49,6 +56,12 @@ type Event struct {
 	TerminalID string `json:"terminal_id"`
 	ResultCode string `json:"result_code"`
 	CreatedAt  string `json:"created_at"`
+}
+
+type scanContext struct {
+	terminalID, token, date, mealCode string
+	employeeID, tokenID, firstEventID int64
+	receivedAt                        time.Time
 }
 
 func Provision(ctx context.Context, db *sql.DB, id, name string) (string, error) {
@@ -94,81 +107,173 @@ func (s *Service) Scan(ctx context.Context, terminalID, token string) (Result, e
 	if len(token) > 128 {
 		return Result{}, ErrInvalidRequest
 	}
+	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Result{}, err
 	}
 	defer tx.Rollback()
-	now := time.Now().UTC()
-	record, lookupErr := paymenttokens.LookupTx(ctx, tx, token)
-	if lookupErr != nil {
-		if errors.Is(lookupErr, paymenttokens.ErrTokenInvalid) {
-			result := Result{Status: "FAILED", Code: "TOKEN_INVALID", Message: "无效就餐码"}
-			return s.commitEvent(ctx, tx, terminalID, token, 0, result)
-		}
-		return Result{}, lookupErr
+	decisionNow := time.Now().UTC()
+	meta := scanContext{terminalID: terminalID, token: token, receivedAt: now}
+	record, err := paymenttokens.LookupTx(ctx, tx, token)
+	if errors.Is(err, paymenttokens.ErrTokenInvalid) {
+		return s.commitScan(ctx, tx, meta, Result{Status: "FAILED", Code: "TOKEN_INVALID", Message: "无效就餐码"})
 	}
-	if record.State == "PROCESSED" {
-		result, err := s.processedResult(ctx, tx, record, true)
-		if err != nil {
+	if err != nil {
+		return Result{}, err
+	}
+	meta.employeeID, meta.tokenID = record.EmployeeID, record.ID
+	var repeatedID int64
+	var repeatedDate, repeatedMeal, repeatedJSON string
+	err = tx.QueryRowContext(ctx, `SELECT id,business_date,meal_code,result_json FROM scan_events
+		WHERE payment_token_id=? AND first_event_id IS NULL AND business_date IS NOT NULL
+		AND COALESCE(json_extract(result_json,'$.replayed'),0)=0
+		AND received_at_ms>? AND received_at_ms<?
+		ORDER BY id DESC LIMIT 1`, record.ID, now.Add(-3*time.Second).UnixMilli(), now.Add(3*time.Second).UnixMilli()).
+		Scan(&repeatedID, &repeatedDate, &repeatedMeal, &repeatedJSON)
+	if err == nil {
+		var result Result
+		if err := json.Unmarshal([]byte(repeatedJSON), &result); err != nil {
 			return Result{}, err
 		}
-		return s.commitEvent(ctx, tx, terminalID, token, record.EmployeeID, result)
-	}
-	var pendingID string
-	var pendingExpiry int64
-	var pendingState, pendingMealCode string
-	var pendingAmount int64
-	err = tx.QueryRowContext(ctx, `SELECT id, expires_at, state, meal_code, amount_cents FROM pending_consumptions WHERE token_id = ?`, record.ID).Scan(&pendingID, &pendingExpiry, &pendingState, &pendingMealCode, &pendingAmount)
-	if err == nil {
-		if pendingState == "PENDING" && now.Unix() < pendingExpiry {
-			expires := time.Unix(pendingExpiry, 0).UTC()
-			var name string
-			if err := tx.QueryRowContext(ctx, `SELECT name FROM employees WHERE id=?`, record.EmployeeID).Scan(&name); err != nil {
-				return Result{}, err
-			}
-			return s.commitEvent(ctx, tx, terminalID, token, record.EmployeeID, Result{Status: "PENDING", Code: "CONFIRM_REQUIRED", Message: "同餐次再次消费，请确认", EmployeeName: name, MealCode: pendingMealCode, AmountCents: pendingAmount, PendingID: pendingID, ExpiresAt: &expires, Replayed: true})
-		}
-		result := Result{Status: "FAILED", Code: "PENDING_EXPIRED", Message: "确认已过期"}
-		return s.commitEvent(ctx, tx, terminalID, token, record.EmployeeID, result)
+		result.Replayed, result.DuplicateTrigger = true, true
+		meta.date, meta.mealCode, meta.firstEventID = repeatedDate, repeatedMeal, repeatedID
+		return s.commitScan(ctx, tx, meta, result)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Result{}, err
 	}
+	if record.State == "PROCESSED" {
+		result, err := s.processedResult(ctx, tx, record.TransactionID)
+		if err != nil {
+			return Result{}, err
+		}
+		result.Replayed = true
+		return s.commitScan(ctx, tx, meta, result)
+	}
+	if pending, err := s.pendingByToken(ctx, tx, record.ID); err == nil {
+		result, err := s.pendingResult(ctx, tx, pending, decisionNow)
+		if err != nil {
+			return Result{}, err
+		}
+		result.Replayed = true
+		meta.date, meta.mealCode = pending.Date, pending.MealCode
+		return s.commitScan(ctx, tx, meta, result)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return Result{}, err
+	}
+	if record.ResultCode != "" {
+		return s.commitScan(ctx, tx, meta, Result{Status: "FAILED", Code: record.ResultCode, Message: record.ResultMessage, Replayed: true})
+	}
+	if record.PresentationID != "" {
+		var presentationState, presentationCode string
+		var presentationTransaction int64
+		err := tx.QueryRowContext(ctx, `SELECT state,COALESCE(result_code,''),COALESCE(transaction_id,0)
+			FROM payment_presentations WHERE id=?`, record.PresentationID).
+			Scan(&presentationState, &presentationCode, &presentationTransaction)
+		if err != nil {
+			return Result{}, err
+		}
+		if presentationState == "SUCCESS" && presentationTransaction > 0 {
+			result, err := s.processedResult(ctx, tx, presentationTransaction)
+			if err != nil {
+				return Result{}, err
+			}
+			result.Replayed = true
+			return s.commitScan(ctx, tx, meta, result)
+		}
+		if presentationState == "FAILED" {
+			return s.commitScan(ctx, tx, meta, Result{Status: "FAILED", Code: presentationCode,
+				Message: "本次就餐码出示已结束，请重新出示", Replayed: true})
+		}
+	}
 	if err := record.FirstUseAllowed(now); err != nil {
-		result := Result{Status: "FAILED", Code: "TOKEN_UNAVAILABLE", Message: "就餐码已过期或账户不可用"}
-		return s.commitEvent(ctx, tx, terminalID, token, record.EmployeeID, result)
+		return s.commitScan(ctx, tx, meta, Result{Status: "FAILED", Code: "TOKEN_UNAVAILABLE", Message: "就餐码已过期或账户不可用"})
 	}
 	period, err := s.meals.ActiveAtTx(ctx, tx, now)
 	if errors.Is(err, meals.ErrNoActivePeriod) {
-		return s.commitEvent(ctx, tx, terminalID, token, record.EmployeeID, Result{Status: "FAILED", Code: "NO_MEAL", Message: "当前无可用餐次"})
+		return s.failScan(ctx, tx, meta, record, Result{Status: "FAILED", Code: "NO_MEAL", Message: "当前无可用餐次"})
 	}
 	if err != nil {
 		return Result{}, err
 	}
-	date := now.In(s.location).Format("2006-01-02")
+	meta.date = now.In(s.location).Format("2006-01-02")
+	meta.mealCode = period.Code
+	if err := s.expirePending(ctx, tx, decisionNow); err != nil {
+		return Result{}, err
+	}
+	var firstID int64
+	var firstJSON string
+	err = tx.QueryRowContext(ctx, `SELECT id,result_json FROM scan_events
+		WHERE employee_id=? AND business_date=? AND meal_code=? AND first_event_id IS NULL
+		AND COALESCE(json_extract(result_json,'$.replayed'),0)=0
+		AND received_at_ms>? AND received_at_ms<? AND result_json IS NOT NULL
+		ORDER BY id DESC LIMIT 1`, record.EmployeeID, meta.date, period.Code, now.Add(-3*time.Second).UnixMilli(), now.Add(3*time.Second).UnixMilli()).Scan(&firstID, &firstJSON)
+	if err == nil {
+		var result Result
+		if err := json.Unmarshal([]byte(firstJSON), &result); err != nil {
+			return Result{}, err
+		}
+		if record.PresentationID != "" {
+			switch result.Status {
+			case "SUCCESS":
+				if _, err := tx.ExecContext(ctx, `UPDATE payment_presentations SET state='SUCCESS',result_code=?,transaction_id=?
+					WHERE id=? AND state='ACTIVE'`, result.Code, result.TransactionID, record.PresentationID); err != nil {
+					return Result{}, err
+				}
+			case "FAILED":
+				if _, err := tx.ExecContext(ctx, `UPDATE payment_presentations SET state='FAILED',result_code=?
+					WHERE id=? AND state='ACTIVE'`, result.Code, record.PresentationID); err != nil {
+					return Result{}, err
+				}
+				if _, err := tx.ExecContext(ctx, `UPDATE payment_tokens SET result_code=?,result_message=?
+					WHERE id=? AND result_code IS NULL`, result.Code, result.Message, record.ID); err != nil {
+					return Result{}, err
+				}
+			}
+		}
+		result.Replayed, result.DuplicateTrigger = true, true
+		meta.firstEventID = firstID
+		return s.commitScan(ctx, tx, meta, result)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Result{}, err
+	}
+	if pending, err := s.activePendingForMeal(ctx, tx, record.EmployeeID, meta.date, period.Code); err == nil {
+		result, err := s.pendingResult(ctx, tx, pending, decisionNow)
+		if err != nil {
+			return Result{}, err
+		}
+		result.Replayed = true
+		return s.commitScan(ctx, tx, meta, result)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return Result{}, err
+	}
 	var previous int
 	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM transactions t WHERE t.account_id = ? AND t.type = 'CONSUME'
 		AND (t.business_id = ? OR (t.business_type = 'MANUAL_SUPPLY' AND EXISTS
 			(SELECT 1 FROM manual_supplies m WHERE m.receipt_ref = t.business_id AND m.business_date = ? AND m.meal_code = ?)))
-		AND NOT EXISTS (SELECT 1 FROM transactions r WHERE r.type = 'REFUND' AND r.related_transaction_id = t.id)`, record.AccountID, date+"|"+period.Code, date, period.Code).Scan(&previous)
+		AND NOT EXISTS (SELECT 1 FROM transactions r WHERE r.type = 'REFUND' AND r.related_transaction_id = t.id)`, record.AccountID, meta.date+"|"+period.Code, meta.date, period.Code).Scan(&previous)
 	if err != nil {
 		return Result{}, err
 	}
 	if previous > 0 {
+		endAt, err := mealEnd(now.In(s.location), period.EndTime)
+		if err != nil {
+			return Result{}, err
+		}
+		expires := now.Add(60 * time.Second)
+		if endAt.Before(expires) {
+			expires = endAt
+		}
 		pendingID, err := randomID("pnd_")
 		if err != nil {
 			return Result{}, err
 		}
-		expires := now.Add(30 * time.Second)
-		if record.ExpiresAt.Before(expires) {
-			expires = record.ExpiresAt
-		}
-		if record.SessionExpiresAt.Before(expires) {
-			expires = record.SessionExpiresAt
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO pending_consumptions(id, token_id, terminal_id, meal_code, business_date, amount_cents, expires_at, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, pendingID, record.ID, terminalID, period.Code, date, period.PriceCents, expires.Unix(), now.Format(time.RFC3339Nano))
+		_, err = tx.ExecContext(ctx, `INSERT INTO pending_consumptions
+			(id,token_id,terminal_id,employee_id,meal_code,meal_name,business_date,amount_cents,meal_end_at,expires_at,created_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?)`, pendingID, record.ID, terminalID, record.EmployeeID, period.Code,
+			period.Name, meta.date, period.PriceCents, endAt.Unix(), expires.Unix(), now.Format(time.RFC3339Nano))
 		if err != nil {
 			return Result{}, err
 		}
@@ -176,144 +281,149 @@ func (s *Service) Scan(ctx context.Context, terminalID, token string) (Result, e
 		if err := tx.QueryRowContext(ctx, `SELECT name FROM employees WHERE id=?`, record.EmployeeID).Scan(&name); err != nil {
 			return Result{}, err
 		}
-		result := Result{Status: "PENDING", Code: "CONFIRM_REQUIRED", Message: "同餐次再次消费，请确认", EmployeeName: name, MealCode: period.Code, AmountCents: period.PriceCents, PendingID: pendingID, ExpiresAt: &expires}
-		return s.commitEvent(ctx, tx, terminalID, token, record.EmployeeID, result)
+		result := Result{Status: "PENDING", Code: "CONFIRM_REQUIRED", Message: "等待员工确认再次消费", EmployeeName: name,
+			MealCode: period.Code, MealName: period.Name, AmountCents: period.PriceCents, PendingID: pendingID, ExpiresAt: &expires}
+		return s.commitScan(ctx, tx, meta, result)
 	}
-	return s.consume(ctx, tx, terminalID, token, record, period.Code, date, period.PriceCents)
+	result, err := s.applyConsumption(ctx, tx, record, terminalID, period.Code, period.Name, meta.date, period.PriceCents)
+	if err != nil {
+		if errors.Is(err, ledger.ErrInsufficientFunds) {
+			return s.failScan(ctx, tx, meta, record, Result{Status: "FAILED", Code: "INSUFFICIENT_FUNDS", Message: "余额不足"})
+		}
+		if errors.Is(err, ledger.ErrAccountUnavailable) {
+			return s.failScan(ctx, tx, meta, record, Result{Status: "FAILED", Code: "ACCOUNT_UNAVAILABLE", Message: "账户不可用"})
+		}
+		return Result{}, err
+	}
+	return s.commitScan(ctx, tx, meta, result)
 }
 
-func (s *Service) Confirm(ctx context.Context, terminalID, pendingID string) (Result, error) {
-	if len(pendingID) < 5 || len(pendingID) > 64 {
-		return Result{}, ErrInvalidRequest
+func mealEnd(local time.Time, end string) (time.Time, error) {
+	if len(end) != 5 {
+		return time.Time{}, fmt.Errorf("invalid meal end time")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Result{}, err
+	var hour, minute int
+	if _, err := fmt.Sscanf(end, "%02d:%02d", &hour, &minute); err != nil {
+		return time.Time{}, err
 	}
-	defer tx.Rollback()
-	var tokenID, amount, expiry, transactionID int64
-	var owner, code, date, state string
-	err = tx.QueryRowContext(ctx, `SELECT token_id, terminal_id, meal_code, business_date, amount_cents, expires_at, state, COALESCE(transaction_id, 0)
-		FROM pending_consumptions WHERE id = ?`, pendingID).Scan(&tokenID, &owner, &code, &date, &amount, &expiry, &state, &transactionID)
-	if errors.Is(err, sql.ErrNoRows) || owner != terminalID {
-		return Result{}, ErrInvalidRequest
-	}
-	if err != nil {
-		return Result{}, err
-	}
-	if state == "PROCESSED" {
-		var record paymenttokens.Record
-		record.TransactionID = transactionID
-		result, err := s.processedResult(ctx, tx, record, true)
-		if err != nil {
-			return Result{}, err
-		}
-		var employeeID int64
-		if err := tx.QueryRowContext(ctx, `SELECT employee_id FROM payment_tokens WHERE id=?`, tokenID).Scan(&employeeID); err != nil {
-			return Result{}, err
-		}
-		return s.commitEvent(ctx, tx, terminalID, "", employeeID, result)
-	}
-	if state != "PENDING" || time.Now().Unix() >= expiry {
-		if state == "PENDING" {
-			if _, err := tx.ExecContext(ctx, `UPDATE pending_consumptions SET state='EXPIRED' WHERE id=?`, pendingID); err != nil {
-				return Result{}, err
-			}
-		}
-		return s.commitEvent(ctx, tx, terminalID, "", 0, Result{Status: "FAILED", Code: "PENDING_EXPIRED", Message: "确认已过期"})
-	}
-	var accountID, employeeID int64
-	var tokenState, employeeStatus, accountStatus string
-	var sessionExpiry, tokenExpiry int64
-	var revoked sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT p.employee_id, a.id, p.state, e.status, a.status, s.expires_at, p.expires_at, s.revoked_at
-		FROM payment_tokens p JOIN employees e ON e.id=p.employee_id JOIN accounts a ON a.employee_id=e.id
-		JOIN employee_sessions s ON s.id=p.session_id WHERE p.id=?`, tokenID).Scan(&employeeID, &accountID, &tokenState, &employeeStatus, &accountStatus, &sessionExpiry, &tokenExpiry, &revoked)
-	if err != nil {
-		return Result{}, err
-	}
-	if tokenState != "ACTIVE" || revoked.Valid || sessionExpiry <= time.Now().Unix() || tokenExpiry <= time.Now().Unix() || employeeStatus != "ACTIVE" || accountStatus != "ACTIVE" {
-		return s.commitEvent(ctx, tx, terminalID, "", employeeID, Result{Status: "FAILED", Code: "TOKEN_UNAVAILABLE", Message: "就餐码或账户不可用"})
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE pending_consumptions SET state='EXPIRED' WHERE id=? AND state='PENDING' AND expires_at <= ?`, pendingID, time.Now().Unix()); err != nil {
-		return Result{}, err
-	}
-	record := paymenttokens.Record{ID: tokenID, EmployeeID: employeeID, AccountID: accountID}
-	result, err := s.consume(ctx, tx, terminalID, "", record, code, date, amount)
-	if err != nil {
-		return Result{}, err
-	}
-	if result.Status == "SUCCESS" {
-		// consume committed the transaction; the pending state must be committed with it.
-		return result, nil
-	}
-	return result, nil
+	return time.Date(local.Year(), local.Month(), local.Day(), hour, minute, 0, 0, local.Location()).UTC(), nil
 }
 
-func (s *Service) consume(ctx context.Context, tx *sql.Tx, terminalID, token string, record paymenttokens.Record, code, date string, amount int64) (Result, error) {
+func (s *Service) failScan(ctx context.Context, tx *sql.Tx, meta scanContext, record paymenttokens.Record, result Result) (Result, error) {
+	if _, err := tx.ExecContext(ctx, `UPDATE payment_tokens SET result_code=?,result_message=? WHERE id=? AND result_code IS NULL`, result.Code, result.Message, record.ID); err != nil {
+		return Result{}, err
+	}
+	if record.PresentationID != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE payment_presentations SET state='FAILED',result_code=? WHERE id=? AND state='ACTIVE'`, result.Code, record.PresentationID); err != nil {
+			return Result{}, err
+		}
+	}
+	return s.commitScan(ctx, tx, meta, result)
+}
+
+func (s *Service) applyConsumption(ctx context.Context, tx *sql.Tx, record paymenttokens.Record, terminalID, code, name, date string, amount int64) (Result, error) {
 	result, err := ledger.ApplyInTx(ctx, tx, ledger.Request{AccountID: record.AccountID, Kind: ledger.Consume, Amount: -amount,
-		TerminalID: terminalID, BusinessType: "MEAL_PERIOD", BusinessID: date + "|" + code, IdempotencyKey: fmt.Sprintf("terminal:%d", record.ID)})
-	if errors.Is(err, ledger.ErrInsufficientFunds) {
-		return s.commitEvent(ctx, tx, terminalID, token, record.EmployeeID, Result{Status: "FAILED", Code: "INSUFFICIENT_FUNDS", Message: "余额不足"})
-	}
-	if errors.Is(err, ledger.ErrAccountUnavailable) {
-		return s.commitEvent(ctx, tx, terminalID, token, record.EmployeeID, Result{Status: "FAILED", Code: "ACCOUNT_UNAVAILABLE", Message: "账户不可用"})
-	}
+		TerminalID: terminalID, BusinessType: "MEAL_PERIOD", BusinessID: date + "|" + code,
+		IdempotencyKey: fmt.Sprintf("terminal:%d", record.ID)})
 	if err != nil {
 		return Result{}, err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE payment_tokens SET state='PROCESSED', transaction_id=? WHERE id=? AND state='ACTIVE'`, result.Entry.ID, record.ID)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO consumption_details(transaction_id,meal_code,meal_name,business_date,amount_cents)
+		VALUES (?,?,?,?,?)`, result.Entry.ID, code, name, date, amount); err != nil {
 		return Result{}, err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE pending_consumptions SET state='PROCESSED', transaction_id=? WHERE token_id=? AND state='PENDING'`, result.Entry.ID, record.ID)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE payment_tokens SET transaction_id=?,state=CASE WHEN state='ACTIVE' THEN 'PROCESSED' ELSE state END WHERE id=?`, result.Entry.ID, record.ID); err != nil {
 		return Result{}, err
 	}
-	var name string
-	if err := tx.QueryRowContext(ctx, `SELECT name FROM employees WHERE id=?`, record.EmployeeID).Scan(&name); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE pending_consumptions SET state='PROCESSED',transaction_id=?,result_code='CONSUMED' WHERE token_id=? AND state='PENDING'`, result.Entry.ID, record.ID); err != nil {
 		return Result{}, err
 	}
-	response := Result{Status: "SUCCESS", Code: "CONSUMED", Message: "消费成功", EmployeeName: name, MealCode: code, AmountCents: amount, TransactionID: result.Entry.ID}
-	return s.commitEvent(ctx, tx, terminalID, token, record.EmployeeID, response)
+	if record.PresentationID != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE payment_presentations SET state='SUCCESS',result_code='CONSUMED',transaction_id=? WHERE id=?`, result.Entry.ID, record.PresentationID); err != nil {
+			return Result{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE payment_tokens SET state='REVOKED'
+			WHERE presentation_id=? AND id!=? AND state='ACTIVE'`, record.PresentationID, record.ID); err != nil {
+			return Result{}, err
+		}
+	}
+	var employeeName string
+	if err := tx.QueryRowContext(ctx, `SELECT name FROM employees WHERE id=?`, record.EmployeeID).Scan(&employeeName); err != nil {
+		return Result{}, err
+	}
+	return Result{Status: "SUCCESS", Code: "CONSUMED", Message: "消费成功", EmployeeName: employeeName,
+		MealCode: code, MealName: name, AmountCents: amount, TransactionID: result.Entry.ID,
+		TransactionNo: result.Entry.TransactionNo, ConsumptionNo: fmt.Sprintf("C%010d", result.Entry.ID),
+		OccurredAt: result.Entry.CreatedAt.Format(time.RFC3339Nano)}, nil
 }
 
-func (s *Service) processedResult(ctx context.Context, tx *sql.Tx, record paymenttokens.Record, replay bool) (Result, error) {
-	var name, businessID string
+func (s *Service) processedResult(ctx context.Context, tx *sql.Tx, transactionID int64) (Result, error) {
+	var name, businessID, transactionNo, createdAt string
+	var mealName, mealCode sql.NullString
 	var amount int64
-	err := tx.QueryRowContext(ctx, `SELECT e.name, t.business_id, -t.amount FROM transactions t JOIN accounts a ON a.id=t.account_id
-		JOIN employees e ON e.id=a.employee_id WHERE t.id=?`, record.TransactionID).Scan(&name, &businessID, &amount)
+	err := tx.QueryRowContext(ctx, `SELECT e.name,t.business_id,-t.amount,t.transaction_no,t.created_at,
+		d.meal_name,d.meal_code FROM transactions t JOIN accounts a ON a.id=t.account_id
+		JOIN employees e ON e.id=a.employee_id LEFT JOIN consumption_details d ON d.transaction_id=t.id WHERE t.id=?`, transactionID).
+		Scan(&name, &businessID, &amount, &transactionNo, &createdAt, &mealName, &mealCode)
 	if err != nil {
 		return Result{}, err
 	}
-	parts := strings.SplitN(businessID, "|", 2)
-	code := ""
-	if len(parts) == 2 {
-		code = parts[1]
+	code := mealCode.String
+	if code == "" {
+		parts := strings.SplitN(businessID, "|", 2)
+		if len(parts) == 2 {
+			code = parts[1]
+		}
 	}
-	return Result{Status: "SUCCESS", Code: "CONSUMED", Message: "消费成功", EmployeeName: name, MealCode: code, AmountCents: amount, TransactionID: record.TransactionID, Replayed: replay}, nil
+	if !mealName.Valid {
+		mealName.String = code
+	}
+	return Result{Status: "SUCCESS", Code: "CONSUMED", Message: "消费成功", EmployeeName: name, MealCode: code,
+		MealName: mealName.String, AmountCents: amount, TransactionID: transactionID,
+		TransactionNo: transactionNo, ConsumptionNo: fmt.Sprintf("C%010d", transactionID), OccurredAt: createdAt}, nil
 }
 
-func (s *Service) commitEvent(ctx context.Context, tx *sql.Tx, terminalID, token string, employeeID int64, result Result) (Result, error) {
+func (s *Service) commitScan(ctx context.Context, tx *sql.Tx, meta scanContext, result Result) (Result, error) {
 	fingerprint := ""
-	if token != "" {
-		sum := sha256.Sum256([]byte(token))
+	if meta.token != "" {
+		sum := sha256.Sum256([]byte(meta.token))
 		fingerprint = hex.EncodeToString(sum[:8])
 	}
-	var employee any
-	if employeeID > 0 {
-		employee = employeeID
+	var employee, tokenID, firstEvent any
+	if meta.employeeID > 0 {
+		employee = meta.employeeID
+	}
+	if meta.tokenID > 0 {
+		tokenID = meta.tokenID
+	}
+	if meta.firstEventID > 0 {
+		firstEvent = meta.firstEventID
 	}
 	var transaction any
 	if result.TransactionID > 0 {
 		transaction = result.TransactionID
 	}
+	var date, mealCode any
+	if meta.date != "" {
+		date = meta.date
+	}
+	if meta.mealCode != "" {
+		mealCode = meta.mealCode
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return Result{}, err
+	}
 	eventCode := result.Code
-	if result.Replayed {
+	if result.DuplicateTrigger {
+		eventCode = "DUPLICATE_TRIGGER"
+	} else if result.Replayed {
 		eventCode = "TOKEN_REPLAY"
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO scan_events(terminal_id,token_fingerprint,employee_id,result_code,transaction_id,created_at)
-		VALUES (?,?,?,?,?,?)`, terminalID, fingerprint, employee, eventCode, transaction, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT INTO scan_events
+		(terminal_id,token_fingerprint,employee_id,result_code,transaction_id,created_at,payment_token_id,business_date,meal_code,received_at_ms,result_json,first_event_id)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, meta.terminalID, fingerprint, employee, eventCode, transaction,
+		meta.receivedAt.Format(time.RFC3339Nano), tokenID, date, mealCode, meta.receivedAt.UnixMilli(), string(encoded), firstEvent)
 	if err != nil {
 		return Result{}, err
 	}
@@ -326,15 +436,15 @@ func (s *Service) Events(ctx context.Context, terminalID string, afterID int64) 
 		return nil, err
 	}
 	defer rows.Close()
-	result := make([]Event, 0)
+	items := make([]Event, 0)
 	for rows.Next() {
 		var event Event
 		if err := rows.Scan(&event.ID, &event.TerminalID, &event.ResultCode, &event.CreatedAt); err != nil {
 			return nil, err
 		}
-		result = append(result, event)
+		items = append(items, event)
 	}
-	return result, rows.Err()
+	return items, rows.Err()
 }
 
 func randomID(prefix string) (string, error) {

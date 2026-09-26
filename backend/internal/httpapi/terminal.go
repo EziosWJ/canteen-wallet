@@ -40,19 +40,6 @@ func terminalRoutes(mux *http.ServeMux, service *terminal.Service) {
 			}
 			result, err := service.Scan(r.Context(), id, input.Token)
 			terminalResult(w, result, err)
-		case "/api/v1/terminal/confirm":
-			if r.Method != http.MethodPost {
-				methodPost(w)
-				return
-			}
-			var input struct {
-				PendingID string `json:"pending_id"`
-			}
-			if !decodeJSON(w, r, 1024, &input) {
-				return
-			}
-			result, err := service.Confirm(r.Context(), id, input.PendingID)
-			terminalResult(w, result, err)
 		case "/api/v1/terminal/heartbeat":
 			if r.Method != http.MethodPost {
 				methodPost(w)
@@ -70,6 +57,26 @@ func terminalRoutes(mux *http.ServeMux, service *terminal.Service) {
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+		case "/api/v1/terminal/pending":
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", "GET")
+				WriteError(w, http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method not allowed")
+				return
+			}
+			result, err := service.LatestPending(r.Context(), id)
+			terminalResult(w, result, err)
+		case "/api/v1/terminal/pending/recent":
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", "GET")
+				WriteError(w, http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method not allowed")
+				return
+			}
+			items, err := service.RecentPending(r.Context(), id)
+			if err != nil {
+				WriteError(w, http.StatusServiceUnavailable, CodeServiceUnavailable, "service unavailable")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"items": items})
 		case "/api/v1/terminal/events":
 			if r.Method != http.MethodGet {
 				w.Header().Set("Allow", "GET")
@@ -84,6 +91,16 @@ func terminalRoutes(mux *http.ServeMux, service *terminal.Service) {
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"items": items})
 		default:
+			if strings.HasPrefix(r.URL.Path, "/api/v1/terminal/pending/") {
+				if r.Method != http.MethodGet {
+					w.Header().Set("Allow", "GET")
+					WriteError(w, http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method not allowed")
+					return
+				}
+				result, err := service.PendingStatus(r.Context(), id, strings.TrimPrefix(r.URL.Path, "/api/v1/terminal/pending/"))
+				terminalResult(w, result, err)
+				return
+			}
 			notFound(w, r)
 		}
 	})
@@ -99,8 +116,8 @@ func terminalResult(w http.ResponseWriter, result terminal.Result, err error) {
 		WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid terminal request")
 		return
 	}
-	if errors.Is(err, terminal.ErrPendingExpired) {
-		writeJSON(w, http.StatusConflict, result)
+	if errors.Is(err, terminal.ErrNotFound) {
+		WriteError(w, http.StatusNotFound, CodeNotFound, "pending consumption not found")
 		return
 	}
 	if err != nil {

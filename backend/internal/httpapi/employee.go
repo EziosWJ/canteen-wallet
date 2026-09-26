@@ -13,9 +13,11 @@ import (
 	"github.com/EziosWJ/canteen-wallet/backend/internal/ledger"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/meals"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/paymenttokens"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/terminal"
 )
 
-func employeeRoutes(public *http.ServeMux, service *employees.Service, tokenService *paymenttokens.Service, ledgerService *ledger.Service, mealService *meals.Service) {
+func employeeRoutes(public *http.ServeMux, service *employees.Service, tokenService *paymenttokens.Service,
+	terminalService *terminal.Service, ledgerService *ledger.Service, mealService *meals.Service) {
 	public.HandleFunc("/api/auth/login", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if r.Method != http.MethodPost {
@@ -203,7 +205,13 @@ func employeeRoutes(public *http.ServeMux, service *employees.Service, tokenServ
 			WriteError(w, http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method not allowed")
 			return
 		}
-		token, err := tokenService.Issue(r.Context(), employeePrincipal(r.Context()))
+		var input struct {
+			PresentationID string `json:"presentation_id"`
+		}
+		if r.ContentLength != 0 && !decodeJSON(w, r, 1024, &input) {
+			return
+		}
+		token, err := tokenService.Issue(r.Context(), employeePrincipal(r.Context()), input.PresentationID)
 		switch {
 		case errors.Is(err, paymenttokens.ErrPasswordChangeRequired):
 			passwordChangeRequired(w)
@@ -211,18 +219,86 @@ func employeeRoutes(public *http.ServeMux, service *employees.Service, tokenServ
 			WriteError(w, http.StatusForbidden, CodeAccountUnavailable, "account is unavailable for consumption")
 		case errors.Is(err, paymenttokens.ErrSessionInvalid):
 			employeeUnauthorized(w)
+		case errors.Is(err, paymenttokens.ErrPresentationUnavailable):
+			WriteError(w, http.StatusConflict, CodeInvalidState, "presentation unavailable")
 		case errors.Is(err, paymenttokens.ErrRefreshTooSoon):
 			seconds := max(1, int(time.Until(token.RefreshAfter).Seconds())+1)
 			w.Header().Set("Retry-After", strconv.Itoa(seconds))
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{
 				"code": CodeRefreshTooSoon, "message": "payment token refresh requested too soon",
-				"refresh_after": token.RefreshAfter,
+				"refresh_after": token.RefreshAfter, "presentation_id": token.PresentationID,
 			})
 		case err != nil:
 			WriteError(w, http.StatusServiceUnavailable, CodeServiceUnavailable, "service is not ready")
 		default:
 			writeJSON(w, http.StatusOK, token)
 		}
+	})
+	me.HandleFunc("/api/me/payment-presentation", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			WriteError(w, http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method not allowed")
+			return
+		}
+		if employeePrincipal(r.Context()).MustChangePassword {
+			passwordChangeRequired(w)
+			return
+		}
+		status, err := terminalService.Presentation(r.Context(), employeePrincipal(r.Context()), r.URL.Query().Get("id"))
+		if errors.Is(err, terminal.ErrNotFound) {
+			WriteError(w, http.StatusNotFound, CodeNotFound, "presentation not found")
+			return
+		}
+		if err != nil {
+			WriteError(w, http.StatusServiceUnavailable, CodeServiceUnavailable, "service unavailable")
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	})
+	me.HandleFunc("/api/me/pending-consumptions/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			WriteError(w, http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method not allowed")
+			return
+		}
+		if employeePrincipal(r.Context()).MustChangePassword {
+			passwordChangeRequired(w)
+			return
+		}
+		path := strings.TrimPrefix(r.URL.Path, "/api/me/pending-consumptions/")
+		parts := strings.Split(path, "/")
+		if len(parts) != 2 {
+			notFound(w, r)
+			return
+		}
+		var result terminal.Result
+		var err error
+		switch parts[1] {
+		case "confirm":
+			result, err = terminalService.ConfirmEmployee(r.Context(), employeePrincipal(r.Context()), parts[0])
+		case "cancel":
+			result, err = terminalService.CancelEmployee(r.Context(), employeePrincipal(r.Context()), parts[0])
+		default:
+			notFound(w, r)
+			return
+		}
+		if errors.Is(err, terminal.ErrNotFound) {
+			WriteError(w, http.StatusNotFound, CodeNotFound, "pending consumption not found")
+			return
+		}
+		if errors.Is(err, terminal.ErrEmployeeSessionInvalid) {
+			employeeUnauthorized(w)
+			return
+		}
+		if errors.Is(err, terminal.ErrInvalidRequest) {
+			WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid pending id")
+			return
+		}
+		if err != nil {
+			WriteError(w, http.StatusServiceUnavailable, CodeServiceUnavailable, "service unavailable")
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
 	})
 	me.HandleFunc("/api/me/", notFound)
 	public.Handle("/api/me", requireEmployee(service, me))

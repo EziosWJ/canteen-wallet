@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -13,14 +14,15 @@ import (
 )
 
 var (
-	ErrSessionInvalid         = errors.New("employee session is invalid")
-	ErrPasswordChangeRequired = errors.New("temporary password must be changed")
-	ErrAccountUnavailable     = errors.New("account is unavailable for consumption")
-	ErrTokenInvalid           = errors.New("payment token is invalid")
-	ErrTokenExpired           = errors.New("payment token has expired")
-	ErrTokenRevoked           = errors.New("payment token is revoked")
-	ErrTokenProcessed         = errors.New("payment token was already processed")
-	ErrRefreshTooSoon         = errors.New("payment token refresh requested too soon")
+	ErrSessionInvalid          = errors.New("employee session is invalid")
+	ErrPasswordChangeRequired  = errors.New("temporary password must be changed")
+	ErrAccountUnavailable      = errors.New("account is unavailable for consumption")
+	ErrTokenInvalid            = errors.New("payment token is invalid")
+	ErrTokenExpired            = errors.New("payment token has expired")
+	ErrTokenRevoked            = errors.New("payment token is revoked")
+	ErrTokenProcessed          = errors.New("payment token was already processed")
+	ErrRefreshTooSoon          = errors.New("payment token refresh requested too soon")
+	ErrPresentationUnavailable = errors.New("payment presentation unavailable")
 )
 
 const (
@@ -29,9 +31,11 @@ const (
 )
 
 type Token struct {
-	Value        string    `json:"token"`
-	RefreshAfter time.Time `json:"refresh_after"`
-	ExpiresAt    time.Time `json:"expires_at"`
+	Value          string    `json:"token"`
+	PresentationID string    `json:"presentation_id"`
+	ServerTime     time.Time `json:"server_time"`
+	RefreshAfter   time.Time `json:"refresh_after"`
+	ExpiresAt      time.Time `json:"expires_at"`
 }
 
 type Record struct {
@@ -40,6 +44,9 @@ type Record struct {
 	SessionID          int64
 	AccountID          int64
 	TransactionID      int64
+	PresentationID     string
+	ResultCode         string
+	ResultMessage      string
 	State              string
 	ExpiresAt          time.Time
 	SessionExpiresAt   time.Time
@@ -77,7 +84,7 @@ type Service struct{ db *sql.DB }
 
 func New(db *sql.DB) *Service { return &Service{db: db} }
 
-func (s *Service) Issue(ctx context.Context, principal employees.Principal) (Token, error) {
+func (s *Service) Issue(ctx context.Context, principal employees.Principal, presentationID string) (Token, error) {
 	if principal.MustChangePassword {
 		return Token{}, ErrPasswordChangeRequired
 	}
@@ -90,6 +97,18 @@ func (s *Service) Issue(ctx context.Context, principal employees.Principal) (Tok
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC().Truncate(time.Second)
+	requestedNew := presentationID == ""
+	if presentationID == "" {
+		var raw [16]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			return Token{}, err
+		}
+		presentationID = "prs_" + hex.EncodeToString(raw[:])
+	} else if len(presentationID) != 36 || presentationID[:4] != "prs_" {
+		return Token{}, ErrPresentationUnavailable
+	} else if _, err := hex.DecodeString(presentationID[4:]); err != nil {
+		return Token{}, ErrPresentationUnavailable
+	}
 	var mustChange int
 	var employeeStatus, accountStatus string
 	err = tx.QueryRowContext(ctx, `SELECT e.must_change_password, e.status, a.status
@@ -109,18 +128,74 @@ func (s *Service) Issue(ctx context.Context, principal employees.Principal) (Tok
 	if employeeStatus != "ACTIVE" || accountStatus != "ACTIVE" {
 		return Token{}, ErrAccountUnavailable
 	}
+	if requestedNew {
+		var activeID string
+		err := tx.QueryRowContext(ctx, `SELECT id FROM payment_presentations
+			WHERE session_id=? AND state='ACTIVE' ORDER BY rowid DESC LIMIT 1`,
+			principal.SessionID).Scan(&activeID)
+		if err == nil {
+			presentationID = activeID
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return Token{}, err
+		}
+	}
+	var presentationState string
+	err = tx.QueryRowContext(ctx, `SELECT state FROM payment_presentations
+		WHERE id=? AND employee_id=? AND session_id=?`, presentationID, principal.ID, principal.SessionID).Scan(&presentationState)
+	if errors.Is(err, sql.ErrNoRows) {
+		var idUsed int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM payment_presentations WHERE id=?`, presentationID).Scan(&idUsed); err != nil {
+			return Token{}, err
+		}
+		if idUsed > 0 {
+			return Token{}, ErrPresentationUnavailable
+		}
+		var otherPending int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_consumptions p
+			JOIN payment_tokens t ON t.id=p.token_id WHERE t.session_id=? AND p.state='PENDING' AND p.expires_at>?`,
+			principal.SessionID, now.Unix()).Scan(&otherPending); err != nil {
+			return Token{}, err
+		}
+		if otherPending > 0 {
+			return Token{}, ErrPresentationUnavailable
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE payment_presentations SET state='FAILED',result_code='SUPERSEDED'
+			WHERE session_id=? AND state='ACTIVE'`, principal.SessionID); err != nil {
+			return Token{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO payment_presentations(id,employee_id,session_id,created_at)
+			VALUES (?,?,?,?)`, presentationID, principal.ID, principal.SessionID, now.Format(time.RFC3339Nano)); err != nil {
+			return Token{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE payment_tokens SET state='REVOKED'
+			WHERE session_id=? AND state='ACTIVE' AND (presentation_id IS NULL OR presentation_id!=?)`, principal.SessionID, presentationID); err != nil {
+			return Token{}, err
+		}
+	} else if err != nil {
+		return Token{}, err
+	} else if presentationState != "ACTIVE" {
+		return Token{}, ErrPresentationUnavailable
+	}
+	var pending int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_consumptions p
+		JOIN payment_tokens t ON t.id=p.token_id WHERE t.presentation_id=? AND p.state='PENDING'`, presentationID).Scan(&pending); err != nil {
+		return Token{}, err
+	}
+	if pending > 0 {
+		return Token{}, ErrPresentationUnavailable
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE payment_tokens SET state = 'EXPIRED'
 		WHERE session_id = ? AND state = 'ACTIVE' AND expires_at <= ?`, principal.SessionID, now.Unix()); err != nil {
 		return Token{}, err
 	}
 	var lastIssued int64
 	err = tx.QueryRowContext(ctx, `SELECT issued_at FROM payment_tokens
-		WHERE session_id = ? AND state = 'ACTIVE' ORDER BY id DESC LIMIT 1`, principal.SessionID).Scan(&lastIssued)
+		WHERE session_id = ? AND presentation_id=? AND state = 'ACTIVE' ORDER BY id DESC LIMIT 1`, principal.SessionID, presentationID).Scan(&lastIssued)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Token{}, err
 	}
 	if err == nil && now.Unix() < lastIssued+int64(refreshInterval/time.Second) {
-		return Token{RefreshAfter: time.Unix(lastIssued, 0).UTC().Add(refreshInterval)}, ErrRefreshTooSoon
+		return Token{PresentationID: presentationID, ServerTime: time.Now().UTC(), RefreshAfter: time.Unix(lastIssued, 0).UTC().Add(refreshInterval)}, ErrRefreshTooSoon
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -129,15 +204,15 @@ func (s *Service) Issue(ctx context.Context, principal employees.Principal) (Tok
 	value := "pmt_" + base64.RawURLEncoding.EncodeToString(raw)
 	hash := sha256.Sum256([]byte(value))
 	_, err = tx.ExecContext(ctx, `INSERT INTO payment_tokens
-		(token_hash, employee_id, session_id, issued_at, expires_at)
-		VALUES (?, ?, ?, ?, ?)`, hash[:], principal.ID, principal.SessionID, now.Unix(), now.Add(validWindow).Unix())
+		(token_hash, employee_id, session_id, issued_at, expires_at, presentation_id)
+		VALUES (?, ?, ?, ?, ?, ?)`, hash[:], principal.ID, principal.SessionID, now.Unix(), now.Add(validWindow).Unix(), presentationID)
 	if err != nil {
 		return Token{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return Token{}, err
 	}
-	return Token{Value: value, RefreshAfter: now.Add(refreshInterval), ExpiresAt: now.Add(validWindow)}, nil
+	return Token{Value: value, PresentationID: presentationID, ServerTime: time.Now().UTC(), RefreshAfter: now.Add(refreshInterval), ExpiresAt: now.Add(validWindow)}, nil
 }
 
 // LookupTx returns the stored result state without accepting the token for a
@@ -154,14 +229,15 @@ func LookupTx(ctx context.Context, tx *sql.Tx, value string) (Record, error) {
 	var mustChange int
 	err = tx.QueryRowContext(ctx, `SELECT p.id, p.employee_id, p.session_id, a.id, p.state,
 		p.expires_at, s.expires_at, s.revoked_at, e.status, a.status, e.must_change_password,
-		p.transaction_id
+		p.transaction_id, COALESCE(p.presentation_id,''), COALESCE(p.result_code,''), COALESCE(p.result_message,'')
 		FROM payment_tokens p
 		JOIN employee_sessions s ON s.id = p.session_id AND s.employee_id = p.employee_id
 		JOIN employees e ON e.id = p.employee_id
 		JOIN accounts a ON a.employee_id = e.id
 		WHERE p.token_hash = ?`, hash[:]).Scan(&record.ID, &record.EmployeeID, &record.SessionID,
 		&record.AccountID, &record.State, &expiresAt, &sessionExpiresAt, &revokedAt,
-		&record.EmployeeStatus, &record.AccountStatus, &mustChange, &transactionID)
+		&record.EmployeeStatus, &record.AccountStatus, &mustChange, &transactionID,
+		&record.PresentationID, &record.ResultCode, &record.ResultMessage)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{}, ErrTokenInvalid
 	}

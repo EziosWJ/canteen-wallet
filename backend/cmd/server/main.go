@@ -120,7 +120,7 @@ func run(logger *slog.Logger) error {
 			}
 		}()
 	}
-	publicServer := &http.Server{Handler: httpapi.Public(db, adminService, employeeService, mealService, tokenService, rechargeService, backupService), ReadHeaderTimeout: 5 * time.Second}
+	publicServer := &http.Server{Handler: httpapi.Public(db, adminService, employeeService, mealService, tokenService, terminalService, rechargeService, backupService), ReadHeaderTimeout: 5 * time.Second}
 	internalServer := &http.Server{Handler: httpapi.Internal(db, terminalService), ReadHeaderTimeout: 5 * time.Second}
 	type serveResult struct {
 		name string

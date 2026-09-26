@@ -45,11 +45,12 @@ type Error struct {
 }
 
 func Public(db *sql.DB, admins *adminauth.Service, employeeService *employees.Service,
-	mealService *meals.Service, tokenService *paymenttokens.Service, rechargeService *recharges.Service, backupService *backups.Service) http.Handler {
+	mealService *meals.Service, tokenService *paymenttokens.Service, terminalService *terminal.Service,
+	rechargeService *recharges.Service, backupService *backups.Service) http.Handler {
 	mux := http.NewServeMux()
 	healthRoutes(mux, db)
 	adminRoutes(mux, db, admins, employeeService, mealService, rechargeService, accounts.New(db), backupService)
-	employeeRoutes(mux, employeeService, tokenService, ledger.New(db), mealService)
+	employeeRoutes(mux, employeeService, tokenService, terminalService, ledger.New(db), mealService)
 	mux.HandleFunc("/api", notFound)
 	mux.HandleFunc("/api/", notFound)
 	mux.Handle("/", webassets.Handler())
