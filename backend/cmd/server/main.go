@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/EziosWJ/canteen-wallet/backend/internal/adminauth"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/backups"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/config"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/employees"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/httpapi"
@@ -20,6 +21,7 @@ import (
 	"github.com/EziosWJ/canteen-wallet/backend/internal/paymenttokens"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/recharges"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/store"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/terminal"
 )
 
 func main() {
@@ -36,10 +38,39 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	if len(os.Args) > 1 {
-		if len(os.Args) != 3 || os.Args[1] != "create-admin" {
-			return fmt.Errorf("usage: canteen-server [create-admin <username>]")
+		if len(os.Args) == 3 && os.Args[1] == "create-admin" {
+			return createAdmin(cfg.DatabasePath, os.Args[2])
 		}
-		return createAdmin(cfg.DatabasePath, os.Args[2])
+		if len(os.Args) == 4 && os.Args[1] == "provision-terminal" {
+			db, err := store.Open(context.Background(), cfg.DatabasePath)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			credential, err := terminal.Provision(context.Background(), db, os.Args[2], os.Args[3])
+			if err != nil {
+				return err
+			}
+			fmt.Println(credential)
+			return nil
+		}
+		if len(os.Args) == 3 && os.Args[1] == "enroll-admin-totp" {
+			db, err := store.Open(context.Background(), cfg.DatabasePath)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			uri, err := adminauth.EnrollTOTP(context.Background(), db, os.Args[2])
+			if err != nil {
+				return err
+			}
+			fmt.Println(uri)
+			return nil
+		}
+		if len(os.Args) == 3 && os.Args[1] == "restore-backup" {
+			return backups.Restore(context.Background(), os.Args[2], cfg.DatabasePath)
+		}
+		return fmt.Errorf("usage: canteen-server [create-admin <username>|provision-terminal <id> <name>|enroll-admin-totp <username>]")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -60,17 +91,37 @@ func run(logger *slog.Logger) error {
 	}
 	defer internalListener.Close()
 
-	adminService := adminauth.New(db, nil) // Password-only until the live-pilot MFA task supplies a verifier.
+	adminService := adminauth.New(db, adminauth.NewTOTP(db))
 	employeeService := employees.New(db)
 	location, err := time.LoadLocation(cfg.TimeZone)
 	if err != nil {
 		return err
 	}
 	mealService := meals.New(db, location)
+	terminalService := terminal.New(db, mealService, location)
 	tokenService := paymenttokens.New(db)
 	rechargeService := recharges.New(db)
-	publicServer := &http.Server{Handler: httpapi.Public(db, adminService, employeeService, mealService, tokenService, rechargeService), ReadHeaderTimeout: 5 * time.Second}
-	internalServer := &http.Server{Handler: httpapi.Internal(db), ReadHeaderTimeout: 5 * time.Second}
+	backupService := &backups.Service{DB: db, DatabasePath: cfg.DatabasePath, ExternalDirectory: os.Getenv("CANTEEN_BACKUP_EXTERNAL_DIR")}
+	if backupService.ExternalDirectory != "" {
+		go func() {
+			ticker := time.NewTicker(time.Hour)
+			defer ticker.Stop()
+			for {
+				backupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				if err := backupService.EnsureDaily(backupCtx); err != nil {
+					logger.Error("daily backup failed", "error", err)
+				}
+				cancel()
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
+	publicServer := &http.Server{Handler: httpapi.Public(db, adminService, employeeService, mealService, tokenService, rechargeService, backupService), ReadHeaderTimeout: 5 * time.Second}
+	internalServer := &http.Server{Handler: httpapi.Internal(db, terminalService), ReadHeaderTimeout: 5 * time.Second}
 	type serveResult struct {
 		name string
 		err  error

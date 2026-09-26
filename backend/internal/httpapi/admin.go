@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,12 +11,13 @@ import (
 
 	"github.com/EziosWJ/canteen-wallet/backend/internal/accounts"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/adminauth"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/backups"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/employees"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/meals"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/recharges"
 )
 
-func adminRoutes(public *http.ServeMux, admins *adminauth.Service, employeeService *employees.Service, mealService *meals.Service, rechargeService *recharges.Service, accountService *accounts.Service) {
+func adminRoutes(public *http.ServeMux, db *sql.DB, admins *adminauth.Service, employeeService *employees.Service, mealService *meals.Service, rechargeService *recharges.Service, accountService *accounts.Service, backupService *backups.Service) {
 	public.HandleFunc("/api/admin/login", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if r.Method != http.MethodPost {
@@ -86,6 +88,9 @@ func adminRoutes(public *http.ServeMux, admins *adminauth.Service, employeeServi
 	adminMealRoutes(admin, mealService)
 	adminRechargeRoutes(admin, rechargeService)
 	adminAccountRoutes(admin, accountService)
+	adminOperationRoutes(admin, db)
+	adminBackupRoutes(admin, backupService)
+	adminImportExportRoutes(admin, db, employeeService)
 	admin.HandleFunc("/api/admin/", notFound)
 	public.Handle("/api/admin/", requireAdmin(admins, admin))
 }

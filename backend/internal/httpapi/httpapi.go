@@ -7,12 +7,14 @@ import (
 
 	"github.com/EziosWJ/canteen-wallet/backend/internal/accounts"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/adminauth"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/backups"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/employees"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/ledger"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/meals"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/paymenttokens"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/recharges"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/store"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/terminal"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/webassets"
 )
 
@@ -43,10 +45,10 @@ type Error struct {
 }
 
 func Public(db *sql.DB, admins *adminauth.Service, employeeService *employees.Service,
-	mealService *meals.Service, tokenService *paymenttokens.Service, rechargeService *recharges.Service) http.Handler {
+	mealService *meals.Service, tokenService *paymenttokens.Service, rechargeService *recharges.Service, backupService *backups.Service) http.Handler {
 	mux := http.NewServeMux()
 	healthRoutes(mux, db)
-	adminRoutes(mux, admins, employeeService, mealService, rechargeService, accounts.New(db))
+	adminRoutes(mux, db, admins, employeeService, mealService, rechargeService, accounts.New(db), backupService)
 	employeeRoutes(mux, employeeService, tokenService, ledger.New(db), mealService)
 	mux.HandleFunc("/api", notFound)
 	mux.HandleFunc("/api/", notFound)
@@ -56,10 +58,10 @@ func Public(db *sql.DB, admins *adminauth.Service, employeeService *employees.Se
 
 // Internal is served on a separate listener. Terminal authentication and
 // consumption routes will be added here, never to Public.
-func Internal(db *sql.DB) http.Handler {
+func Internal(db *sql.DB, terminalService *terminal.Service) http.Handler {
 	mux := http.NewServeMux()
 	healthRoutes(mux, db)
-	mux.HandleFunc("/api/v1/terminal/", notFound)
+	terminalRoutes(mux, terminalService)
 	mux.HandleFunc("/", notFound)
 	return mux
 }

@@ -18,7 +18,7 @@ type Config struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		PublicAddr:   value("CANTEEN_PUBLIC_ADDR", "127.0.0.1:8080"),
+		PublicAddr:   value("CANTEEN_PUBLIC_ADDR", "127.0.0.1:5001"),
 		InternalAddr: value("CANTEEN_INTERNAL_ADDR", "127.0.0.1:8081"),
 		DatabasePath: value("CANTEEN_DB_PATH", "data/canteen.db"),
 		TimeZone:     value("CANTEEN_TIME_ZONE", "Asia/Shanghai"),

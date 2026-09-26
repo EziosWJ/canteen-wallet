@@ -2,7 +2,7 @@
 
 公司内部单食堂的员工储值餐费系统。员工通过手机 H5 展示动态就餐码，现场终端扫码后按餐次扣款；管理员处理线下充值、退款、结清与对账。
 
-**实施状态：**[SPEC-001](https://github.com/EziosWJ/canteen-wallet/issues/1) 与 CW-01 至 CW-19 任务已经建立；CW-01 至 CW-07 的后端基础与账务接口、CW-12 静态页面稿、CW-13 员工 H5 已落地。终端消费、管理后台、运营和现场验收仍按后续任务推进。编译通过不代表业务或现场验收通过。
+**实施状态：**[SPEC-001](https://github.com/EziosWJ/canteen-wallet/issues/1) 与 CW-01 至 CW-19 任务已经建立；CW-01 至 CW-10、CW-13 至 CW-18 的开发入口已落地。现场设备、浏览器流程、备份恢复和故障演练仍需人工验收。编译通过不代表业务或现场验收通过。
 
 ## 实施基线
 
@@ -21,7 +21,7 @@ task build
 task run
 ```
 
-`task build` 执行前端依赖安装与 TypeScript/Vite 生产编译，将 `web/dist` 复制到 `backend/internal/webassets/dist`，再生成 `build/canteen-server`。`task run` 会先完整构建，再前台启动该二进制。二进制在公开监听上提供嵌入的员工页面和同源 `/api`；内部终端 API 仍由独立监听提供。`web/dist`、嵌入副本和最终二进制均为生成物，不提交到 Git。`task backend:compile` 可单独编译检查所有 Go 包；`task dev:backend` 与 `task dev:web` 分别启动本地后端和 Vite 开发服务器，需在两个终端运行。
+`task build` 执行前端依赖安装与 TypeScript/Vite 生产编译，将 `web/dist` 复制到 `backend/internal/webassets/dist`，再生成 `build/canteen-server`、`build/canteen-scan-agent` 和 `build/canteen-scan-sim`。`task run` 会先完整构建，再前台启动服务二进制。服务在公开监听上提供嵌入页面和同源 `/api`；内部终端 API 由独立监听提供。`web/dist`、嵌入副本和二进制均为生成物，不提交到 Git。`task backend:compile` 可单独编译检查所有 Go 包；`task dev:backend` 与 `task dev:web` 分别启动本地后端和 Vite 开发服务器，需在两个终端运行。
 
 Vite 将 `/api` 代理到 `127.0.0.1:8080`；`CANTEEN_WEB_API_TARGET` 可改代理目标。默认公开 HTTP 监听 `127.0.0.1:8080`，内部终端 HTTP 监听 `127.0.0.1:8081`，数据库位于 `backend/data/canteen.db`。正式环境由 HTTPS 反向代理暴露公开入口，内部终端入口仅供现场设备访问。
 
@@ -29,10 +29,10 @@ Vite 将 `/api` 代理到 `127.0.0.1:8080`；`CANTEEN_WEB_API_TARGET` 可改代�
 
 ## 已有接口与约束
 
-首次管理员在 `backend/` 运行 `go run ./cmd/server create-admin <username>` 建立。密码由终端隐藏输入并确认，不作为命令参数。管理员通过 `POST /api/admin/login` 获取 12 小时 Bearer 会话；真实试点前仍需按 CW-15 接入独立第二因素。公开入口还需在反向代理限制登录请求速率。
+首次管理员在 `backend/` 运行 `go run ./cmd/server create-admin <username>` 建立。密码由终端隐藏输入并确认，不作为命令参数。每位管理员需运行 `canteen-server enroll-admin-totp <username>` 设置独立第二因素，然后通过 `POST /api/admin/login` 的 `second_factor_code` 获取 12 小时 Bearer 会话。TOTP 丢失时同一 CLI 命令受审计地重置密钥并撤销旧会话。公开入口还需在反向代理限制登录请求速率。
 
 管理员可通过 `/api/admin/employees` 建档和查询，通过 `/api/admin/employees/{id}` 查看、调整状态及重置临时密码；临时密码只返回一次。`POST /api/admin/recharges` 确认带凭据的线下充值，`POST /api/admin/recharges/{id}/reverse` 冲正。`POST /api/admin/accounts/{id}/adjust` 接收带符号的 `amount_cents`、`reason`、`idempotency_key`；`POST /api/admin/accounts/{id}/withdraw` 接收 `payout_ref`、`paid_at`、`payment_method`、`idempotency_key`，关户后的历史退款结清可另带 `related_refund_transaction_id`。零余额直接关户仍使用员工状态接口。资金操作均由后端写入流水和审计，不能直接改余额。
 
 员工通过 `POST /api/auth/login` 登录，首次使用临时密码必须通过 `POST /api/me/change-password` 修改。`GET /api/me`、`GET /api/me/account`、`GET /api/me/transactions`、`GET /api/me/meal-periods`、`POST /api/me/payment-token` 和 `POST /api/auth/logout` 均需员工 Bearer 会话。本人流水按 `?cursor=<上页 next_cursor>&limit=20` 游标分页，返回 `items` 和 `next_cursor`；新设备登录撤销旧会话。动态就餐码约每 30 秒允许刷新一次，提前请求返回 429 和下次可刷新时间；目前仍需后续消费链路才能完成扫码扣款。
 
-`GET /api/admin/meal-periods` 和 `PUT /api/admin/meal-periods/{code}` 用于配置三餐时段及固定餐费。接口和任务边界详见 SPEC-001 与各 GitHub Issue。当前阶段只要求前后端编译；浏览器和现场业务流程由用户人工测试。
+`GET /api/admin/meal-periods` 和 `PUT /api/admin/meal-periods/{code}` 用于配置三餐时段及固定餐费。扫码终端通过 `canteen-server provision-terminal <id> <name>` 取得独立凭据；内部 `/api/v1/terminal/scan`、`confirm`、`heartbeat` 和 `events` 均需该凭据。`canteen-scan-sim` 可提交真实员工 Token 并模拟断网；Linux Scan Agent 直接读 USB 输入设备，向本地终端屏提供 `/api/display/state`。管理员新增退款、流水查询、终端状态、扫码事件、XLSX 人员预览和确认、CSV 导出、日结、收款复核、故障供餐补录与备份入口。Linux 现场安装、外部备份和恢复步骤见 [deploy/README.md](./deploy/README.md)。当前阶段只要求前后端编译；浏览器和现场业务流程由用户人工测试。

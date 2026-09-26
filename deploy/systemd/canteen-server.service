@@ -1,0 +1,24 @@
+[Unit]
+Description=Canteen Wallet Go Server
+After=network-online.target local-fs.target
+Wants=network-online.target
+RequiresMountsFor=/var/lib/canteen /mnt/canteen-backup
+
+[Service]
+Type=simple
+User=canteen
+Group=canteen
+EnvironmentFile=/etc/canteen/canteen.env
+ExecStart=/opt/canteen/canteen-server
+Restart=always
+RestartSec=3
+StateDirectory=canteen
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/canteen /mnt/canteen-backup
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

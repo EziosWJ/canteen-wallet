@@ -1,6 +1,6 @@
-# 员工 H5
+# 食堂储值卡 Web
 
-React、Vite、TypeScript 实现的员工端。所有账户、余额、就餐码和流水数据来自同源 Go API；页面不包含演示账户或演示交易。视觉沿用 `design/reference/` 与 `assets/ui/`。
+React、Vite、TypeScript 实现的员工 H5、管理员后台和独立核销屏。账户、余额、流水、终端结果等业务数据均来自服务 API；页面不包含演示账户或演示交易。视觉沿用 `design/reference/` 与 `assets/ui/`。
 
 ## 本地运行
 
@@ -24,5 +24,14 @@ task dev:backend
 | 首页餐次卡片 | `GET /api/me/meal-periods` |
 | 动态就餐码 | `POST /api/me/payment-token` |
 | 首页最近流水、全部流水 | `GET /api/me/transactions?cursor=...` |
+| 管理员登录、退出 | `POST /api/admin/login`、`GET /api/admin/me`、`POST /api/admin/logout` |
+| 人员、状态和临时密码 | `/api/admin/employees`、`/api/admin/employees/{id}/status`、`/reset-password` |
+| 充值、冲正、退款、调整、余额退还 | `/api/admin/recharges`、`/api/admin/recharges/{id}/reverse`、`/api/admin/transactions/{id}/refund`、`/api/admin/accounts/{id}/adjust|withdraw` |
+| 餐次、流水、终端和扫码事件 | `/api/admin/meal-periods`、`/api/admin/transactions`、`/api/admin/terminals`、`/api/admin/scan-events` |
+| 日结、收款复核 | `/api/admin/reconciliation/daily`、`/api/admin/receipt-reviews` |
+| Excel、故障供餐补录、备份和导出 | `/api/admin/imports`、`/api/admin/manual-supplies`、`/api/admin/backups`、`/api/admin/exports/{kind}` |
+| 核销屏 | 本地 Scan Agent 的 `GET /api/display/state`、`POST /api/display/confirm` |
+
+管理页面在 `/admin`，核销屏在 `/terminal`。管理员使用独立 Bearer 会话并输入管理员第二因素验证码。核销浏览器只访问本机 Scan Agent 的只读状态与人工确认代理；设备凭据不进入浏览器存储。
 
 金额按后端返回的分显示为元。首页餐次卡片直接展示已配置的时段、价格和开放状态。动态码按服务端 `refresh_after` 更新，并在 `expires_at` 到达后隐藏。

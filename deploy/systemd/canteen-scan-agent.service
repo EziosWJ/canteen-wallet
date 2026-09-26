@@ -1,0 +1,21 @@
+[Unit]
+Description=Canteen Wallet USB Scan Agent
+After=canteen-server.service
+Requires=canteen-server.service
+
+[Service]
+Type=simple
+User=canteen
+Group=canteen
+SupplementaryGroups=input
+EnvironmentFile=/etc/canteen/canteen.env
+ExecStart=/opt/canteen/canteen-scan-agent
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

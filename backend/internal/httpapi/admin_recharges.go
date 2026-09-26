@@ -79,6 +79,7 @@ func fundTransactionJSON(entry ledger.Entry) map[string]any {
 		"after_balance_cents": entry.AfterBalance, "administrator_id": entry.AdministratorID,
 		"business_type": entry.BusinessType, "business_id": entry.BusinessID,
 		"related_transaction_id": entry.RelatedTransactionID, "created_at": entry.CreatedAt,
+		"terminal_id": entry.TerminalID, "reason": entry.Reason,
 	}
 }
 

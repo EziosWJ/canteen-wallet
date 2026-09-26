@@ -55,6 +55,14 @@ func adminEmployeeRoutes(admin *http.ServeMux, service *employees.Service) {
 			writeJSON(w, http.StatusOK, item)
 			return
 		}
+		if len(parts) == 1 && r.Method == http.MethodPatch {
+			var input employees.CreateInput
+			if !decodeJSON(w,r,16384,&input) { return }
+			item,err:=service.UpdateProfile(r.Context(),actorID,id,input)
+			if err!=nil { employeeError(w,err);return }
+			writeJSON(w,http.StatusOK,item)
+			return
+		}
 		if len(parts) == 2 && parts[1] == "status" && r.Method == http.MethodPatch {
 			var request struct {
 				Status string `json:"status"`

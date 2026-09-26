@@ -1,0 +1,1 @@
+ALTER TABLE terminals ADD COLUMN database_status TEXT NOT NULL DEFAULT 'UNKNOWN';

@@ -43,6 +43,7 @@ type CreateInput struct {
 
 type Employee struct {
 	ID                 int64   `json:"id"`
+	AccountID          int64   `json:"account_id"`
 	EmployeeNo         string  `json:"employee_no"`
 	Name               string  `json:"name"`
 	Phone              string  `json:"phone"`
@@ -95,7 +96,7 @@ func (s *Service) Create(ctx context.Context, actorID int64, input CreateInput) 
 	if err != nil {
 		return Employee{}, "", err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO accounts (employee_id, balance, status, created_at, updated_at)
+	accountResult, err := tx.ExecContext(ctx, `INSERT INTO accounts (employee_id, balance, status, created_at, updated_at)
 		VALUES (?, 0, ?, ?, ?)`, id, input.Status, now, now)
 	if err != nil {
 		return Employee{}, "", err
@@ -107,13 +108,17 @@ func (s *Service) Create(ctx context.Context, actorID int64, input CreateInput) 
 		return Employee{}, "", err
 	}
 	photo := pointerIfNotEmpty(input.PhotoURL)
-	return Employee{ID: id, EmployeeNo: input.EmployeeNo, Name: input.Name, Phone: input.Phone,
+	accountID, err := accountResult.LastInsertId()
+	if err != nil {
+		return Employee{}, "", err
+	}
+	return Employee{ID: id, AccountID: accountID, EmployeeNo: input.EmployeeNo, Name: input.Name, Phone: input.Phone,
 		Department: input.Department, PhotoURL: photo, Status: input.Status, AccountStatus: input.Status,
 		Balance: 0, MustChangePassword: true}, temporaryPassword, nil
 }
 
 func (s *Service) Get(ctx context.Context, id int64) (Employee, error) {
-	const query = `SELECT e.id, e.employee_no, e.name, e.phone, e.department, e.photo_url,
+	const query = `SELECT e.id, a.id, e.employee_no, e.name, e.phone, e.department, e.photo_url,
 		e.status, a.status, a.balance, e.must_change_password
 		FROM employees e JOIN accounts a ON a.employee_id = e.id WHERE e.id = ?`
 	item, err := scanEmployee(s.db.QueryRowContext(ctx, query, id))
@@ -124,7 +129,7 @@ func (s *Service) Get(ctx context.Context, id int64) (Employee, error) {
 }
 
 func (s *Service) List(ctx context.Context) ([]Employee, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.employee_no, e.name, e.phone, e.department, e.photo_url,
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, a.id, e.employee_no, e.name, e.phone, e.department, e.photo_url,
 		e.status, a.status, a.balance, e.must_change_password
 		FROM employees e JOIN accounts a ON a.employee_id = e.id ORDER BY e.id LIMIT 500`)
 	if err != nil {
@@ -140,6 +145,54 @@ func (s *Service) List(ctx context.Context) ([]Employee, error) {
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// UpdateProfile changes employee identity fields without touching account funds
+// or employment status. Existing uniqueness constraints remain authoritative.
+func (s *Service) UpdateProfile(ctx context.Context, actorID, id int64, input CreateInput) (Employee, error) {
+	input.EmployeeNo = strings.TrimSpace(input.EmployeeNo)
+	input.Name = strings.TrimSpace(input.Name)
+	input.Phone = normalizePhone(input.Phone)
+	input.Department = strings.TrimSpace(input.Department)
+	input.PhotoURL = strings.TrimSpace(input.PhotoURL)
+	if !employeeNoPattern.MatchString(input.EmployeeNo) || len(input.Name) < 1 || len(input.Name) > 100 ||
+		!phonePattern.MatchString(input.Phone) || len(input.Department) < 1 || len(input.Department) > 100 || !validPhotoURL(input.PhotoURL) {
+		return Employee{}, ErrInvalidInput
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Employee{}, err
+	}
+	defer tx.Rollback()
+	var currentStatus string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM employees WHERE id=?`, id).Scan(&currentStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Employee{}, ErrNotFound
+	}
+	if err != nil {
+		return Employee{}, err
+	}
+	if currentStatus == "CLOSED" {
+		return Employee{}, ErrInvalidState
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE employees SET employee_no=?,name=?,phone=?,department=?,photo_url=?,updated_at=? WHERE id=? AND status!='CLOSED'`, input.EmployeeNo, input.Name, input.Phone, input.Department, nullString(input.PhotoURL), time.Now().UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return Employee{}, classifyWrite(err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return Employee{}, err
+	}
+	if count == 0 {
+		return Employee{}, ErrNotFound
+	}
+	if err := store.RecordAudit(ctx, tx, actorID, "EMPLOYEE_PROFILE_UPDATED", "employee", strconv.FormatInt(id, 10), nil); err != nil {
+		return Employee{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Employee{}, err
+	}
+	return s.Get(ctx, id)
 }
 
 func (s *Service) SetStatus(ctx context.Context, actorID, id int64, target string) (Employee, error) {
@@ -246,7 +299,7 @@ func scanEmployee(row scanner) (Employee, error) {
 	var item Employee
 	var photo sql.NullString
 	var mustChange int
-	err := row.Scan(&item.ID, &item.EmployeeNo, &item.Name, &item.Phone, &item.Department,
+	err := row.Scan(&item.ID, &item.AccountID, &item.EmployeeNo, &item.Name, &item.Phone, &item.Department,
 		&photo, &item.Status, &item.AccountStatus, &item.Balance, &mustChange)
 	if err != nil {
 		return Employee{}, err

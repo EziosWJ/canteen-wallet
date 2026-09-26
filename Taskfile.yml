@@ -32,6 +32,8 @@ tasks:
       - assets/ui/home-header-bg.png
       - assets/ui/login-cafeteria-bg.png
       - assets/ui/phone-qr-illustration.png
+      - assets/ui/scan-frame.png
+      - assets/ui/success-illustration.png
     generates:
       - web/public/assets/ui/app-logo.png
       - web/public/assets/ui/default-avatar.png
@@ -39,9 +41,11 @@ tasks:
       - web/public/assets/ui/home-header-bg.png
       - web/public/assets/ui/login-cafeteria-bg.png
       - web/public/assets/ui/phone-qr-illustration.png
+      - web/public/assets/ui/scan-frame.png
+      - web/public/assets/ui/success-illustration.png
     cmds:
       - mkdir -p web/public/assets/ui
-      - cp assets/ui/app-logo.png assets/ui/default-avatar.png assets/ui/footer-waves.png assets/ui/home-header-bg.png assets/ui/login-cafeteria-bg.png assets/ui/phone-qr-illustration.png web/public/assets/ui/
+      - cp assets/ui/app-logo.png assets/ui/default-avatar.png assets/ui/footer-waves.png assets/ui/home-header-bg.png assets/ui/login-cafeteria-bg.png assets/ui/phone-qr-illustration.png assets/ui/scan-frame.png assets/ui/success-illustration.png web/public/assets/ui/
 
   web:build:
     desc: 编译 React/Vite 前端
@@ -59,11 +63,13 @@ tasks:
       - cp -R web/dist/. backend/internal/webassets/dist/
 
   backend:build:
-    desc: 编译包含前端资源的 Go Server 二进制
+    desc: 编译包含前端资源的 Go Server、Scan Agent 与扫码模拟器
     cmds:
       - task: web:embed
       - mkdir -p build
       - cd backend && go build -o ../build/canteen-server ./cmd/server
+      - cd backend && go build -o ../build/canteen-scan-agent ./cmd/scan-agent
+      - cd backend && go build -o ../build/canteen-scan-sim ./cmd/scan-sim
 
   backend:compile:
     desc: 编译检查所有 Go 包，不生成部署二进制
