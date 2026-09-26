@@ -1,0 +1,79 @@
+# ---------- 编译产物 ----------
+/build/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go 编译出的可执行文件（保留源码目录名称）
+canteen-stored-value-system/canteen-stored-value-system
+frontpage/frontpage
+
+# ---------- 依赖 ----------
+/vendor/
+node_modules/
+.pnpm-store/
+.yarn/cache/
+.yarn/install-state.gz
+
+# ---------- 测试与覆盖率 ----------
+coverage.out
+coverage.html
+*.cover
+*.coverprofile
+profile.cov
+
+# ---------- 前端构建缓存 ----------
+.vite/
+.turbo/
+.next/
+.nuxt/
+.cache/
+.eslintcache
+.stylelintcache
+*.tsbuildinfo
+
+# ---------- 环境变量与密钥 ----------
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+secrets.yaml
+secrets.yml
+
+# ---------- 运行时数据 ----------
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs/
+/tmp/
+/data/
+/uploads/
+
+# ---------- 编辑器与 IDE ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---------- Windows 下载标记（NTFS ADS 被解压成的垃圾文件） ----------
+*:Zone.Identifier
+Desktop.ini
+
+# ---------- 操作系统 ----------
+.DS_Store
+.DS_Store?
+Thumbs.db
+desktop.ini
+
+# ---------- 其它 ----------
+*.bak
+*.tmp
