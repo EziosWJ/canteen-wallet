@@ -1,6 +1,10 @@
 # ---------- 编译产物 ----------
 /build/
 /dist/
+/web/dist/
+/web/public/
+/backend/internal/webassets/dist/*
+!/backend/internal/webassets/dist/.keep
 *.exe
 *.exe~
 *.dll
@@ -28,6 +32,7 @@ coverage.html
 profile.cov
 
 # ---------- 前端构建缓存 ----------
+.task/
 .vite/
 .turbo/
 .next/
@@ -49,8 +54,13 @@ secrets.yml
 
 # ---------- 运行时数据 ----------
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 *.sqlite
 *.sqlite3
+*.sqlite-shm
+*.sqlite-wal
 *.log
 logs/
 /tmp/
@@ -77,3 +87,8 @@ desktop.ini
 # ---------- 其它 ----------
 *.bak
 *.tmp
+
+# ---------- 未纳入版本库的页面稿与素材原图 ----------
+/frontend/
+/frontpage/canteen视觉/
+

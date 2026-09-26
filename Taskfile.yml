@@ -1,0 +1,85 @@
+version: '3'
+
+tasks:
+  default:
+    desc: 列出可用的项目任务
+    cmds:
+      - task --list
+
+  build:
+    desc: 编译前端并嵌入 Go Server
+    cmds:
+      - task: backend:build
+
+  run:
+    desc: 构建并运行嵌入式 Go Server
+    cmds:
+      - task: build
+      - cd backend && ../build/canteen-server
+
+  web:install:
+    desc: 安装前端锁定依赖
+    dir: web
+    cmds:
+      - npm ci
+
+  web:assets:
+    desc: 将页面用到的素材从 assets/ui 复制到 Vite public 目录
+    sources:
+      - assets/ui/app-logo.png
+      - assets/ui/default-avatar.png
+      - assets/ui/footer-waves.png
+      - assets/ui/home-header-bg.png
+      - assets/ui/login-cafeteria-bg.png
+      - assets/ui/phone-qr-illustration.png
+    generates:
+      - web/public/assets/ui/app-logo.png
+      - web/public/assets/ui/default-avatar.png
+      - web/public/assets/ui/footer-waves.png
+      - web/public/assets/ui/home-header-bg.png
+      - web/public/assets/ui/login-cafeteria-bg.png
+      - web/public/assets/ui/phone-qr-illustration.png
+    cmds:
+      - mkdir -p web/public/assets/ui
+      - cp assets/ui/app-logo.png assets/ui/default-avatar.png assets/ui/footer-waves.png assets/ui/home-header-bg.png assets/ui/login-cafeteria-bg.png assets/ui/phone-qr-illustration.png web/public/assets/ui/
+
+  web:build:
+    desc: 编译 React/Vite 前端
+    cmds:
+      - task: web:install
+      - task: web:assets
+      - npm --prefix web run build
+
+  web:embed:
+    desc: 将前端生产文件复制到 Go embed 目录
+    cmds:
+      - task: web:build
+      - mkdir -p backend/internal/webassets/dist
+      - find backend/internal/webassets/dist -mindepth 1 -maxdepth 1 ! -name .keep -exec rm -rf -- {} +
+      - cp -R web/dist/. backend/internal/webassets/dist/
+
+  backend:build:
+    desc: 编译包含前端资源的 Go Server 二进制
+    cmds:
+      - task: web:embed
+      - mkdir -p build
+      - cd backend && go build -o ../build/canteen-server ./cmd/server
+
+  backend:compile:
+    desc: 编译检查所有 Go 包，不生成部署二进制
+    dir: backend
+    cmds:
+      - go build ./...
+
+  dev:web:
+    desc: 启动 Vite 开发服务器（需另行启动 Go 服务）
+    cmds:
+      - task: web:install
+      - task: web:assets
+      - npm --prefix web run dev
+
+  dev:backend:
+    desc: 启动 Go 开发服务
+    dir: backend
+    cmds:
+      - go run ./cmd/server
