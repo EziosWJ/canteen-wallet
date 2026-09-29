@@ -73,6 +73,31 @@ export type MealPeriod = {
   enabled: boolean;
 };
 
+/** Server-decided preview for the fixed self-service link. The meal, business
+ * date, price and existing count all come from the server; intent_id is the
+ * credential bound to this employee and this confirmation intent. */
+export type SelfServicePreview = {
+  status: 'READY' | 'UNAVAILABLE';
+  code?: string;
+  message?: string;
+  meal_code?: string;
+  meal_name?: string;
+  business_date?: string;
+  amount_cents?: number;
+  existing_count: number;
+  intent_id?: string;
+};
+
+/** Result of confirming or re-reading one intent. CONFIRM_REQUIRED means the
+ * preview changed and carries the newest preview to confirm. */
+export type SelfServiceOutcome = {
+  status: 'SUCCESS' | 'REJECTED' | 'CONFIRM_REQUIRED';
+  code?: string;
+  message?: string;
+  consumption?: ConsumptionResult;
+  preview?: SelfServicePreview;
+};
+
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string,
     public refreshAfter?: string, public presentationId?: string) {
@@ -149,6 +174,37 @@ export function clearPaymentCache(session: Session): void {
   try { sessionStorage.removeItem(paymentCacheKey(session)); } catch { /* Storage can be disabled. */ }
 }
 
+// The last self-service intent is remembered so a refreshed success page can ask
+// the server for the same consumption instead of showing a fresh preview and
+// making the employee think they must pay again. The marker expires quickly: a
+// refresh right after confirming recovers the same consumption, while coming back
+// to the link later starts a new preview.
+const SELF_SERVICE_RECOVERY_MS = 5 * 60 * 1000;
+
+function selfServiceKey(session: Session): string { return `canteen-self-service-${session.employee_id}`; }
+
+export function readLastSelfServiceIntent(session: Session): string | null {
+  try {
+    const raw = sessionStorage.getItem(selfServiceKey(session));
+    if (!raw) return null;
+    const saved = JSON.parse(raw) as { intent_id?: string; at?: number };
+    if (!saved.intent_id || typeof saved.at !== 'number' || Date.now() - saved.at > SELF_SERVICE_RECOVERY_MS) {
+      sessionStorage.removeItem(selfServiceKey(session));
+      return null;
+    }
+    return saved.intent_id;
+  } catch { return null; }
+}
+
+export function saveLastSelfServiceIntent(session: Session, intentId: string): void {
+  try { sessionStorage.setItem(selfServiceKey(session), JSON.stringify({ intent_id: intentId, at: Date.now() })); }
+  catch { /* Storage can be disabled. */ }
+}
+
+export function clearLastSelfServiceIntent(session: Session): void {
+  try { sessionStorage.removeItem(selfServiceKey(session)); } catch { /* Storage can be disabled. */ }
+}
+
 async function request<T>(path: string, options: RequestInit = {}, session: Session | null = readSession()): Promise<T> {
   let response: Response;
   try {
@@ -210,5 +266,18 @@ export const api = {
   },
   mealPeriods(session: Session) {
     return request<{ meal_periods: MealPeriod[] }>('/api/me/meal-periods', {}, session);
+  },
+  // Opening the self-service page is an explicit server operation: it cancels
+  // this employee's own waiting scan requests and returns the current preview.
+  openSelfService(session: Session) {
+    return request<SelfServicePreview>('/api/me/self-service', { method: 'POST' }, session);
+  },
+  confirmSelfService(session: Session, intentId: string) {
+    return request<SelfServiceOutcome>(`/api/me/self-service/${encodeURIComponent(intentId)}/confirm`, { method: 'POST' }, session);
+  },
+  // Reading the result never charges; a refreshed success page recovers the
+  // same consumption from the server.
+  selfServiceResult(session: Session, intentId: string) {
+    return request<SelfServiceOutcome>(`/api/me/self-service/${encodeURIComponent(intentId)}/result`, {}, session);
   },
 };
