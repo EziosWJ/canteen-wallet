@@ -29,6 +29,14 @@ const pendingColumns = `p.id,p.terminal_id,p.meal_code,p.meal_name,p.business_da
 	p.meal_end_at,p.expires_at,COALESCE(p.transaction_id,0),COALESCE(t.presentation_id,'')`
 
 func scanPending(row *sql.Row) (pendingRecord, error) {
+	return scanPendingRows(row)
+}
+
+// pendingScanner covers both *sql.Row and *sql.Rows so the pending columns can be
+// read one at a time or in bulk with the same column list.
+type pendingScanner interface{ Scan(dest ...any) error }
+
+func scanPendingRows(row pendingScanner) (pendingRecord, error) {
 	var p pendingRecord
 	err := row.Scan(&p.ID, &p.TerminalID, &p.MealCode, &p.MealName, &p.Date, &p.State,
 		&p.ResultCode, &p.TokenID, &p.EmployeeID, &p.SessionID, &p.AccountID, &p.Amount,

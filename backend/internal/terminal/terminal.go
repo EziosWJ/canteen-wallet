@@ -250,10 +250,7 @@ func (s *Service) Scan(ctx context.Context, terminalID, token string) (Result, e
 		return Result{}, err
 	}
 	var previous int
-	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM transactions t WHERE t.account_id = ? AND t.type = 'CONSUME'
-		AND (t.business_id = ? OR (t.business_type = 'MANUAL_SUPPLY' AND EXISTS
-			(SELECT 1 FROM manual_supplies m WHERE m.receipt_ref = t.business_id AND m.business_date = ? AND m.meal_code = ?)))
-		AND NOT EXISTS (SELECT 1 FROM transactions r WHERE r.type = 'REFUND' AND r.related_transaction_id = t.id)`, record.AccountID, meta.date+"|"+period.Code, meta.date, period.Code).Scan(&previous)
+	err = consumptionCount(ctx, tx, record.AccountID, meta.date, period.Code, &previous)
 	if err != nil {
 		return Result{}, err
 	}
