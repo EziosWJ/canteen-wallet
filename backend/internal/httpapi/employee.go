@@ -300,9 +300,83 @@ func employeeRoutes(public *http.ServeMux, service *employees.Service, tokenServ
 		}
 		writeJSON(w, http.StatusOK, result)
 	})
+	me.HandleFunc("/api/me/self-service", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			WriteError(w, http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method not allowed")
+			return
+		}
+		if employeePrincipal(r.Context()).MustChangePassword {
+			passwordChangeRequired(w)
+			return
+		}
+		// Opening the page is an explicit server operation that cancels this
+		// employee's own waiting scan requests before showing the preview.
+		preview, err := terminalService.SelfServiceSession(r.Context(), employeePrincipal(r.Context()))
+		if err != nil {
+			writeSelfServiceError(w, err, "self-service preview")
+			return
+		}
+		writeJSON(w, http.StatusOK, preview)
+	})
+	me.HandleFunc("/api/me/self-service/", func(w http.ResponseWriter, r *http.Request) {
+		if employeePrincipal(r.Context()).MustChangePassword {
+			passwordChangeRequired(w)
+			return
+		}
+		path := strings.TrimPrefix(r.URL.Path, "/api/me/self-service/")
+		parts := strings.Split(path, "/")
+		if len(parts) != 2 {
+			notFound(w, r)
+			return
+		}
+		switch parts[1] {
+		case "confirm":
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", "POST")
+				WriteError(w, http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method not allowed")
+				return
+			}
+			outcome, err := terminalService.ConfirmSelfService(r.Context(), employeePrincipal(r.Context()), parts[0])
+			if err != nil {
+				writeSelfServiceError(w, err, "self-service confirmation")
+				return
+			}
+			writeJSON(w, http.StatusOK, outcome)
+		case "result":
+			// Reading the outcome never charges; it lets a refreshed success page
+			// recover the same consumption from the server.
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", "GET")
+				WriteError(w, http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method not allowed")
+				return
+			}
+			outcome, err := terminalService.SelfServiceStatus(r.Context(), employeePrincipal(r.Context()), parts[0])
+			if err != nil {
+				writeSelfServiceError(w, err, "self-service result")
+				return
+			}
+			writeJSON(w, http.StatusOK, outcome)
+		default:
+			notFound(w, r)
+		}
+	})
 	me.HandleFunc("/api/me/", notFound)
 	public.Handle("/api/me", requireEmployee(service, me))
 	public.Handle("/api/me/", requireEmployee(service, me))
+}
+
+func writeSelfServiceError(w http.ResponseWriter, err error, operation string) {
+	switch {
+	case errors.Is(err, terminal.ErrNotFound):
+		WriteError(w, http.StatusNotFound, CodeNotFound, operation+" not found")
+	case errors.Is(err, terminal.ErrEmployeeSessionInvalid):
+		employeeUnauthorized(w)
+	case errors.Is(err, terminal.ErrInvalidRequest):
+		WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid self-service request")
+	default:
+		WriteError(w, http.StatusServiceUnavailable, CodeServiceUnavailable, "service unavailable")
+	}
 }
 
 func employeeSessionResponse(session employees.Session) map[string]any {
