@@ -228,10 +228,17 @@ func ApplyInTx(ctx context.Context, tx *sql.Tx, request Request) (Result, error)
 }
 
 func validate(request Request) error {
+	// A transaction has exactly one actor, except self-service consumption: the
+	// employee confirms it, so it carries neither an administrator nor a terminal.
+	selfService := request.BusinessType == "SELF_SERVICE"
+	actorOK := (request.AdministratorID > 0) != (request.TerminalID != "")
+	if selfService {
+		actorOK = request.AdministratorID == 0 && request.TerminalID == ""
+	}
 	if request.AccountID < 1 || request.Amount == 0 || request.Amount == math.MinInt64 ||
 		!validText(request.BusinessType, 64) || !validText(request.BusinessID, 128) ||
 		!validText(request.IdempotencyKey, 128) || len(request.Reason) > 512 ||
-		(request.AdministratorID > 0) == (request.TerminalID != "") ||
+		!actorOK ||
 		(request.AdministratorID < 0) || (request.TerminalID != "" && !validText(request.TerminalID, 64)) ||
 		request.RelatedTransactionID < 0 {
 		return ErrInvalidRequest
@@ -270,6 +277,11 @@ func validate(request Request) error {
 			return ErrInvalidRequest
 		}
 		if request.Kind == Consume && request.AdministratorID > 0 && request.BusinessType != "MANUAL_SUPPLY" {
+			return ErrInvalidRequest
+		}
+		// Self-service consumption is confirmed by the employee, so it belongs to
+		// neither a terminal nor an administrator.
+		if request.Kind == Consume && request.TerminalID == "" && request.AdministratorID == 0 && request.BusinessType != "SELF_SERVICE" {
 			return ErrInvalidRequest
 		}
 		if request.Kind == BalanceWithdrawal && request.BusinessType != "PAYOUT_RECEIPT" {
