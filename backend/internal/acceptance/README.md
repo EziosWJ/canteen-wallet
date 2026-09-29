@@ -1,6 +1,10 @@
-# SPEC-002 验收测试（issue #21）
+# 验收测试（SPEC-002 #21、SPEC-003 #22）
 
-本目录是「就餐码恢复、扫码结果同步与同餐次再次消费确认」的可自动化验收套件。
+本目录是可自动化验收套件，覆盖两批规格：
+
+- **SPEC-002**（#21）「就餐码恢复、扫码结果同步与同餐次再次消费确认」
+- **SPEC-003**（#22）「固定链接自助消费与扫码待确认切换」，见
+  [自助消费覆盖对照](#spec-003-自助消费覆盖对照issue-22)。
 
 ## 运行
 
@@ -76,6 +80,60 @@ SQLite 库，并起两个 `httptest` 服务端。
 | 34 并发只有一个终态 | `TestConcurrentScansHaveOneFinalState`、`TestConcurrentDecisionHasOneFinalState` |
 | 余额不足 | `TestInsufficientFundsIsFinalForTheCode`、`TestConfirmationChecksFundsAtConfirmationTime` |
 
+## SPEC-003 自助消费覆盖对照（issue #22）
+
+用户故事（issue #22）→ 用例：
+
+| 故事 | 用例 |
+| --- | --- |
+| 1、2、4 固定链接先登录、只为本消费 | `TestSelfServiceRequiresLoginAndReturnsToTheSamePage` |
+| 3 首次登录先改临时密码 | `TestSelfServiceRequiresPasswordChangeFirst` |
+| 5、6 服务端判定餐次与餐费 | `TestSelfServicePreviewShowsServerDecidedMealAndPrice` |
+| 7 展示本业务日期本餐次已有次数 | `TestSelfServicePreviewShowsServerDecidedMealAndPrice`、`TestSelfServiceCountIgnoresWaitingScanRequest` |
+| 8 已有一笔时提示继续消费 | `TestSelfServiceCountsScanSelfServiceAndManualSupply` |
+| 9 多笔时显示准确次数 | `TestSelfServiceCountsScanSelfServiceAndManualSupply`（第 3 笔不误报为第 2 笔） |
+| 10 扫码/自助/人工补录都计入 | `TestSelfServiceCountsScanSelfServiceAndManualSupply` |
+| 11 全额退款不计入 | `TestSelfServiceCountExcludesRefundedConsumption` |
+| 12 无当前餐次说明原因且不能扣款 | `TestSelfServicePreviewRejectsWhenNoMealIsActive` |
+| 13 打开链接与查看预览不扣款 | `TestSelfServicePreviewShowsServerDecidedMealAndPrice` |
+| 14 首次自助也须点击确认 | `TestSelfServiceConfirmChargesOnceAndShowsDetails` |
+| 15 再次自助逐笔确认 | `TestSelfServiceCountsScanSelfServiceAndManualSupply` |
+| 16 确认前可离开不产生消费 | `TestSelfServicePreviewShowsServerDecidedMealAndPrice` |
+| 17 餐次结束拒绝扣款 | `TestSelfServiceRefusesWhenMealEndedAfterPreview` |
+| 18 餐费变化返回新预览再确认 | `TestSelfServiceRepreviewsWhenPriceChanged` |
+| 19 次数变化返回新预览再确认 | `TestSelfServiceRepreviewsWhenCountChanged` |
+| 20 余额不足明确未完成 | `TestSelfServiceRefusesWithInsufficientFunds` |
+| 21 账户不可用/登录失效不能扣款 | `TestSelfServiceRefusesWhenAccountUnavailable`、`TestSelfServiceRefusesWhenSessionRevoked` |
+| 22 双击/重试/并发只一笔 | `TestSelfServiceResultSurvivesRefresh`、`TestSelfServiceConcurrentConfirmsChargeOnce` |
+| 23 成功页展示餐次/金额/时间/编号 | `TestSelfServiceConfirmChargesOnceAndShowsDetails` |
+| 24 刷新成功页仍是同一笔 | `TestSelfServiceResultSurvivesRefresh` |
+| 25 只有主动“再次消费”才下一笔 | `TestSelfServiceRetryDoesNotBecomeANewConsumption` |
+| 26 再次消费重新展示最新信息 | `TestSelfServiceCountsScanSelfServiceAndManualSupply` |
+| 27 进入页面自动取消本人待确认 | `TestSelfServiceEntryCancelsOwnScanRequest` |
+| 28 已完成的扫码消费不被撤销 | `TestSelfServiceEntryKeepsCompletedScanConsumption` |
+| 29 取消与扫码确认并发只有一个终态 | `TestSelfServiceEntryRacingScanConfirmHasOneOutcome`、`TestSelfServiceCancelledRequestCannotBeConfirmed` |
+| 30 终端看到被取消的最终状态 | `TestSelfServiceEntryCancelsOwnScanRequest` |
+| 31 来源可区分、编号沿用资金流水 | `TestSelfServiceConfirmChargesOnceAndShowsDetails`、`TestSelfServiceCountsScanSelfServiceAndManualSupply` |
+| 32 历史详情保留当时快照 | `TestSelfServiceConfirmChargesOnceAndShowsDetails` |
+| 33 余额与资金流水可核对 | `TestSelfServiceConfirmChargesOnceAndShowsDetails` |
+| 34 不能查看或取消他人 | `TestSelfServiceCannotReadOrConfirmAnotherEmployee`、`TestSelfServiceEntryKeepsOtherEmployeesRequests` |
+
+自助消费额外固定的事实：
+
+- 入口是共享的固定路径，链接本身不承载员工身份、金额或餐次；未登录返回 401，
+  未改临时密码返回 403。
+- 进入页面的操作在**一次事务**内取消本人所有 `PENDING` 扫码请求（终态
+  `FAILED`/`CANCELLED`，终端按原编号可查），再生成预览；重试返回同一 `intent_id`。
+- 预览由服务端按食堂当地时间判定餐次、业务日期与餐费；无餐次时返回
+  `UNAVAILABLE`/`NO_ACTIVE_PERIOD` 且不返回凭据。
+- `intent_id` 是确认意图的稳定幂等标识：同意图的并发提交、重试与结果查询返回同一笔
+  消费；`GET .../result` 只读，不产生扣款。
+- 自助消费写入 `business_type='SELF_SERVICE'` 的 `CONSUME` 资金流水，既无
+  `terminal_id` 也无 `administrator_id`，与终端扫码 `MEAL_PERIOD`、人工补录
+  `MANUAL_SUPPLY` 可区分；消费编号仍由资金流水 ID 唯一确定。
+- 计数规则与扫码再次消费判定共用同一实现（`consumptionCount`），因此三个入口
+  互相可见。
+
 ## 未被本套件覆盖
 
 只通过 HTTP，无法替代浏览器的作用：
@@ -84,6 +142,11 @@ SQLite 库，并起两个 `httptest` 服务端。
   暂停与恢复、断网时隐藏过期码的渲染、成功页自动跳转。这些需要前端测试（当前仓库
   没有 vitest/playwright 依赖），本套件只固定了它们依赖的服务端契约。
 - `paymentCacheKey`/`readPaymentCache` 等前端缓存工具没有测试。
+- SPEC-003 的**前端交互**同样只能人工验证，本套件固定其服务端契约：固定链接的
+  登录与强制改密回跳、预览变化后的重新确认、成功页刷新恢复与「再次消费」。相关
+  实现见 `web/src/SelfService.tsx`、`web/src/Auth.tsx`（登录/改密组件从
+  `App.tsx` 抽出以复用，`web/src/main.tsx` 注册 `/self-service` 路径）。仓库当前
+  没有 vitest/playwright 依赖，故未加入端到端浏览器用例。
 - 充值冲正、余额退还、日结与管理员复核流程超出 #21 范围，未覆盖。
 - 并发用例的深度有限：服务以单写连接运行（`store.Open` 的 `SetMaxOpenConns(1)`），
   `database/sql` 会把请求串行化，因此这些用例验证的是 HTTP 层交错，而不是真正并行的

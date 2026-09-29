@@ -920,3 +920,27 @@ func (e *env) revokeSession(session string) {
 		e.t.Fatalf("revoke session affected %d rows (err %v)", affected, err)
 	}
 }
+
+// postManualSupply registers a fault-supply receipt and posts it as a CONSUME
+// transaction, so a self-service count can be checked against the manual-supply
+// entrance described in SPEC-003.
+func (e *env) postManualSupply(employeeID int64, receiptRef, date string, amount int64) {
+	e.t.Helper()
+	var created struct {
+		ID int64 `json:"id"`
+	}
+	e.post(e.public.URL, "/api/admin/manual-supplies", e.adminToken, map[string]any{
+		"receipt_ref": receiptRef, "employee_id": employeeID, "meal_code": defaultMealCode,
+		"business_date": date, "amount_cents": amount, "note": "验收测试补录",
+	}).expect(e.t, http.StatusCreated, &created)
+	e.post(e.public.URL, fmt.Sprintf("/api/admin/manual-supplies/%d/post", created.ID), e.adminToken,
+		map[string]string{"idempotency_key": "acceptance-manual-post-" + receiptRef}).
+		expect(e.t, http.StatusCreated, nil)
+}
+
+// selfServiceRequiresMeal activates the default meal window for the duration of
+// the test, matching the other suites' setup.
+func (e *env) selfServiceRequiresMeal() {
+	e.t.Helper()
+	e.activateMeal(defaultMealCode, defaultMealName, mealPrice, 20*time.Minute, 20*time.Minute)
+}
