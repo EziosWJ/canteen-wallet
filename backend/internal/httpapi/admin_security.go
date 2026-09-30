@@ -82,6 +82,31 @@ func adminSecurityRoutes(admin *http.ServeMux, admins *adminauth.Service) {
 		// including the caller's, so the client must sign in again.
 		writeJSON(w, http.StatusOK, map[string]any{"second_factor_bound": true, "replaced": replaced, "sessions_revoked": true})
 	})
+
+	admin.HandleFunc("/api/admin/security/second-factor", func(w http.ResponseWriter, r *http.Request) {
+		noStore(w)
+		if r.Method != http.MethodDelete && r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST, DELETE")
+			WriteError(w, http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method not allowed")
+			return
+		}
+		var request struct {
+			Password     string `json:"password"`
+			SecondFactor string `json:"second_factor_code"`
+		}
+		if !decodeJSON(w, r, 2048, &request) {
+			return
+		}
+		if request.Password == "" || len(request.Password) > 1024 || len(request.SecondFactor) > 128 {
+			WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid request body")
+			return
+		}
+		if err := admins.RemoveSecondFactor(r.Context(), principalFromContext(r.Context()), request.Password, strings.TrimSpace(request.SecondFactor)); err != nil {
+			writeAdminAuthError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"second_factor_bound": false, "sessions_revoked": true})
+	})
 }
 
 func writeAdminAuthError(w http.ResponseWriter, err error) {
@@ -90,6 +115,8 @@ func writeAdminAuthError(w http.ResponseWriter, err error) {
 		WriteError(w, http.StatusUnauthorized, CodeInvalidCredentials, "invalid password or second factor")
 	case errors.Is(err, adminauth.ErrUnauthenticated):
 		unauthorized(w)
+	case errors.Is(err, adminauth.ErrSecondFactorNotBound):
+		WriteError(w, http.StatusConflict, CodeInvalidState, "no second factor is bound to this administrator")
 	case errors.Is(err, adminauth.ErrSecondFactorPending):
 		WriteError(w, http.StatusConflict, CodeInvalidState, "no pending second factor enrollment")
 	case errors.Is(err, adminauth.ErrSecondFactorExpired):

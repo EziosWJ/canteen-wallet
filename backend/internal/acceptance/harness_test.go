@@ -63,6 +63,9 @@ type env struct {
 	admins         *adminauth.Service
 	adminToken     string
 	lastAdminToken string
+	// adminFactor is the fixture administrator's current authenticator secret,
+	// empty while unbound.
+	adminFactor []byte
 }
 
 type employee struct {
@@ -161,6 +164,31 @@ func (e *env) loginAdminRaw(username, password, code string) apiResponse {
 		payload["second_factor_code"] = code
 	}
 	return e.post(e.public.URL, "/api/admin/login", "", payload)
+}
+
+// nextAdminCode mints a valid authenticator code for the fixture administrator.
+// Confirming a binding and signing in repeatedly can happen inside one 30-second
+// window, where the replay guard would reject a second use of the same step, so
+// the fixture clears the stored last-used step first. The code itself is still a
+// genuine current code and is verified through the normal login path.
+func (e *env) nextAdminCode() string {
+	e.t.Helper()
+	if len(e.adminFactor) == 0 {
+		return ""
+	}
+	if _, err := e.db.ExecContext(e.t.Context(),
+		`UPDATE administrators SET totp_last_step=-1 WHERE username=?`, adminUsername); err != nil {
+		e.t.Fatalf("reset second factor step: %v", err)
+	}
+	return totpCode(e.adminFactor, time.Now())
+}
+
+// reLoginAdmin signs the fixture administrator in again after a binding change
+// revoked the previous session, and returns the fresh token.
+func (e *env) reLoginAdmin() string {
+	e.t.Helper()
+	e.adminToken = e.loginAdmin(adminUsername, adminPassword, e.nextAdminCode())
+	return e.adminToken
 }
 
 // enrollAdminCLI binds a second factor through the server command used for a

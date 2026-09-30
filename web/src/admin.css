@@ -17,3 +17,12 @@
 .admin-note{margin-top:18px;border:1px solid #e8f0f5;border-radius:13px;background:#fbfdff;padding:15px 17px}
 .admin-note h3{font-size:14px;margin:0 0 8px;color:#3f5f7b}
 .admin-note ul{margin:0;padding-left:19px;color:var(--a-muted);font-size:13px;line-height:1.75}
+.security-actions{display:grid;gap:12px}
+.enrollment-panel{display:grid;gap:13px;justify-items:center;text-align:center;border:1px solid #e8f0f5;border-radius:15px;padding:19px;background:#fbfdff}
+.enrollment-panel .admin-muted{margin:0;max-width:430px}
+.enrollment-qr{width:230px;height:230px;image-rendering:pixelated;border:1px solid #eaf1f6;border-radius:13px;background:#fff;padding:9px}
+.enrollment-secret{display:grid;gap:5px;justify-items:center;margin:0}
+.enrollment-secret span{font-size:12px;color:var(--a-muted);font-weight:700}
+.enrollment-secret code{font-family:ui-monospace,"SFMono-Regular",Menlo,monospace;font-size:14px;letter-spacing:.09em;background:#eef6fc;border:1px solid #dce9f3;border-radius:9px;padding:8px 12px;overflow-wrap:anywhere}
+.enrollment-panel .admin-form{width:100%;max-width:390px;text-align:left}
+.admin-form small.admin-muted{font-weight:500}

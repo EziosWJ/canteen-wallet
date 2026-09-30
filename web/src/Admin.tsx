@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { adminApi, AdminApiError, readAdminSession, saveAdminSession, type AdminAccount, type AdminEmployee, type AdminMeal, type AdminSession, type ConsumptionModes } from './adminApi';
+import QRCode from 'qrcode';
+import { adminApi, AdminApiError, readAdminSession, saveAdminSession, type AdminAccount, type AdminEmployee, type AdminMeal, type AdminSession, type ConsumptionModes, type SecondFactorEnrollment, type SecurityState } from './adminApi';
 import './admin.css';
 
 type Section = 'employees' | 'ledger' | 'meals' | 'modes' | 'terminals' | 'closing' | 'operations' | 'security' | 'audit';
@@ -133,6 +134,7 @@ export default function Admin() {
   const [meals, setMeals] = useState<AdminMeal[]>([]);
   const [modes, setModes] = useState<ConsumptionModes | null>(null);
   const [accounts, setAccounts] = useState<AdminAccount[]>([]);
+  const [security, setSecurity] = useState<SecurityState | null>(null);
   const [me, setMe] = useState<{ id: number; username: string } | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showEdit, setShowEdit] = useState<AdminEmployee | null>(null);
@@ -148,7 +150,10 @@ export default function Admin() {
       let data: unknown;
       if (section === 'employees') { const response = await adminApi.employees(session); setEmployees(response.employees || []); data = response; }
       else if (section === 'meals') { const response = await adminApi.mealPeriods(session); setMeals(response.meal_periods || []); data = response; }
-      else if (section === 'security') { const people = await adminApi.administrators(session); setAccounts(people.administrators || []); data = people; }
+      else if (section === 'security') {
+        const [state, people] = await Promise.all([adminApi.security(session), adminApi.administrators(session)]);
+        setSecurity(state); setAccounts(people.administrators || []); data = state;
+      }
       else if (section === 'modes') { const response = await adminApi.adminConsumptionModes(session); setModes(response); data = response; }
       else if (section === 'operations') { const [response, people] = await Promise.all([adminApi.generic<unknown>(session, '/api/admin/backups'), adminApi.employees(session)]); setEmployees(people.employees || []); data = response; }
       else {
@@ -172,7 +177,13 @@ export default function Admin() {
 
   useEffect(() => {
     if (!session) return;
-    adminApi.me(session).then(value => { setIdentity(value.username); setMe({ id: value.id, username: value.username }); }).catch(reason => { if (reason instanceof AdminApiError && reason.status === 401) expire(); else setIdentity(session.administrator.username); });
+    adminApi.me(session).then(value => {
+      setIdentity(value.username);
+      setMe({ id: value.id, username: value.username });
+      // /api/admin/me already carries the binding state, so the header can show
+      // it without a second request on every page.
+      setSecurity(current => current ?? { second_factor_bound: value.second_factor_bound, enrollment_pending: value.enrollment_pending });
+    }).catch(reason => { if (reason instanceof AdminApiError && reason.status === 401) expire(); else setIdentity(session.administrator.username); });
   }, [session, expire]);
   useEffect(() => { void load(); }, [load]);
 
@@ -211,6 +222,7 @@ export default function Admin() {
           <div className="admin-note"><h3>关闭入口时会发生什么</h3><ul><li>该入口已展示但尚未确认的扫码请求、自助消费意图会被终止，不会扣款。</li><li>重新开启后需要员工重新发起消费。</li><li>已完成的消费、历史流水查询和退款不受影响。</li></ul></div>
         </Panel>}
         {section === 'security' && <>
+          <SelfSecurityPanel session={session} security={security} busy={busy} onNotice={setNotice} onExpired={expire}/>
           <AdministratorPanel session={session} me={me} accounts={accounts} busy={busy} onNotice={setNotice} onChanged={() => void load()}/>
         </>}
         {section === 'terminals' && <><Panel title="终端状态" description="设备心跳、扫码枪和服务状态由终端服务提供。">{state.busy ? <Loading/> : state.error ? <ErrorBox retry={() => void load()}>{state.error}</ErrorBox> : <Table rows={rowsFrom(state.data)}/>}</Panel><Panel title="扫码事件" description="仅展示脱敏事件摘要，不显示原始 Token。"><RemoteTable session={session} path="/api/admin/scan-events"/></Panel></>}
@@ -351,6 +363,119 @@ function ImportPanel({ session, onNotice }: { session: AdminSession; onNotice: (
     finally { setBusy(false); }
   }
   return <div className="admin-import"><p className="admin-muted import-template">Excel 首行使用列名：employee_no、name、phone、department、status。status 可为 ACTIVE 或 FROZEN。</p><label className="file-picker">选择 Excel 文件<input type="file" accept=".xlsx" onChange={e => { setFile(e.target.files?.[0] || null); setPreview(null); setCreated([]); setConfirmed(false); }}/></label><button className="admin-secondary" disabled={!file || busy} onClick={() => void previewFile()}>{busy ? '正在校验…' : '上传并预览'}</button>{preview != null && <><p className="admin-muted">校验结果由服务端返回，请核对正确行和错误行。</p><Table rows={preview.rows}/>{preview.errors.length > 0 && <><p className="inline-error">错误行报告</p><Table rows={preview.errors}/><ExportButton session={session} kind="error-report" path={`/api/admin/imports/${encodeURIComponent(preview.preview_id)}/errors`} filename="import-errors.csv"/></>}{!confirmed && <button className="admin-primary" disabled={busy} onClick={() => void confirmImport()}>确认导入有效行</button>}{created.length > 0 && <><p className="admin-muted">以下临时密码只在当前页面显示；请通过安全渠道交付给对应员工。</p><Table rows={created}/></>}</>}</div>;
+}
+
+/** The signed-in administrator's own authenticator. Binding is optional, so the
+ * panel works in three states: unbound, pending, bound. */
+function SelfSecurityPanel({ session, security, busy, onNotice, onExpired }: {
+  session: AdminSession; security: SecurityState | null; busy: boolean;
+  onNotice: (value: string) => void; onExpired: () => void;
+}) {
+  const [step, setStep] = useState<'idle' | 'credentials' | 'scan'>('idle');
+  // Which change the administrator asked for. Binding and replacing both collect
+  // the password (and, when already bound, the current code) and then show a new
+  // QR code; unbinding collects the same credentials and removes the binding.
+  const [intent, setIntent] = useState<'bind' | 'replace' | 'unbind'>('bind');
+  const [password, setPassword] = useState('');
+  const [currentCode, setCurrentCode] = useState('');
+  const [confirmCode, setConfirmCode] = useState('');
+  const [enrollment, setEnrollment] = useState<SecondFactorEnrollment | null>(null);
+  const [qrData, setQrData] = useState('');
+  const [localBusy, setLocalBusy] = useState(false);
+  const bound = Boolean(security?.second_factor_bound);
+
+  // The QR code is rendered from the URI the server returned for this pending
+  // binding only. Nothing is cached: the secret is shown once and never again.
+  useEffect(() => {
+    let cancelled = false;
+    setQrData('');
+    if (enrollment) void QRCode.toDataURL(enrollment.otpauth_uri, {
+      errorCorrectionLevel: 'M', margin: 2, width: 260, color: { dark: '#17324D', light: '#FFFFFF' },
+    }).then(data => { if (!cancelled) setQrData(data); });
+    return () => { cancelled = true; };
+  }, [enrollment]);
+
+  const reset = () => { setStep('idle'); setIntent('bind'); setPassword(''); setCurrentCode(''); setConfirmCode(''); setEnrollment(null); };
+  const choose = (next: 'bind' | 'replace' | 'unbind') => { setIntent(next); setStep('credentials'); setPassword(''); setCurrentCode(''); onNotice(''); };
+
+  async function start() {
+    setLocalBusy(true); onNotice('');
+    try {
+      const value = await adminApi.startEnrollment(session, password, currentCode.trim());
+      setEnrollment(value); setStep('scan'); setConfirmCode('');
+    } catch (reason) { onNotice(securityMessage(reason)); }
+    finally { setLocalBusy(false); }
+  }
+
+  async function confirm() {
+    setLocalBusy(true); onNotice('');
+    try {
+      await adminApi.confirmEnrollment(session, confirmCode.trim());
+      reset();
+      // Binding revokes every session, including this one, so the page must sign
+      // in again instead of pretending the old session still works.
+      saveAdminSession(null);
+      onNotice('动态验证码已启用，请使用新验证码重新登录。');
+      onExpired();
+    } catch (reason) { onNotice(securityMessage(reason)); }
+    finally { setLocalBusy(false); }
+  }
+
+  async function remove() {
+    setLocalBusy(true); onNotice('');
+    try {
+      await adminApi.removeSecondFactor(session, password, currentCode.trim());
+      reset();
+      saveAdminSession(null);
+      onNotice('动态验证码已解除绑定，请重新登录。');
+      onExpired();
+    } catch (reason) { onNotice(securityMessage(reason)); }
+    finally { setLocalBusy(false); }
+  }
+
+  return <Panel title="我的登录安全" description="动态验证码（TOTP）为可选绑定；未绑定时仅凭密码登录，绑定时每次登录都需要验证码。"
+    action={<span className={`admin-status ${bound ? 'ok' : 'warn'}`}>{bound ? '已绑定' : '未绑定'}</span>}>
+    {security?.enrollment_pending && step !== 'scan' && <div className="admin-alert" role="status">有一个未完成的绑定过程{security.enrollment_expires_at ? `，将在 ${new Date(security.enrollment_expires_at).toLocaleTimeString('zh-CN', { hour12: false })} 失效` : ''}。重新开始会作废它。</div>}
+
+    {step === 'idle' && <div className="security-actions">
+      <p className="admin-muted">{bound
+        ? '已绑定动态验证码。更换需先输入密码和当前的验证码，解绑后仅凭密码登录。'
+        : '尚未绑定动态验证码。绑定后每次登录都需要输入验证码；请同时保存恢复方式，遗忘时由运维在服务器上执行恢复命令。'}</p>
+      <div className="admin-inline-actions">
+        <button className="admin-primary" type="button" onClick={() => choose(bound ? 'replace' : 'bind')} disabled={busy}>{bound ? '更换动态验证码' : '绑定动态验证码'}</button>
+        {bound && <button className="admin-secondary" type="button" onClick={() => choose('unbind')}>解除绑定</button>}
+      </div>
+    </div>}
+
+    {step === 'credentials' && <form className="admin-form" onSubmit={event => { event.preventDefault(); void (intent === 'unbind' ? remove() : start()); }}>
+      <label>当前登录密码<input type="password" autoComplete="current-password" required value={password} onChange={e => setPassword(e.target.value)}/></label>
+      {bound && <label>当前动态验证码<input inputMode="numeric" autoComplete="one-time-code" required value={currentCode} onChange={e => setCurrentCode(e.target.value)}/><small className="admin-muted">来自当前已绑定的验证器。</small></label>}
+      {!bound && <p className="admin-muted">首次绑定无需旧验证码；输入密码后系统会给出二维码。</p>}
+      <div className="admin-form-actions">
+        <button className="admin-secondary" type="button" onClick={reset} disabled={localBusy}>取消</button>
+        <button className={intent === 'unbind' ? 'admin-secondary' : 'admin-primary'} disabled={localBusy}>{localBusy ? '正在处理…' : intent === 'unbind' ? '确认解除绑定' : '生成新二维码'}</button>
+      </div>
+      {intent === 'unbind'
+        ? <p className="admin-muted">解除绑定后所有管理员会话都会被注销，需要使用密码重新登录。</p>
+        : bound
+          ? <p className="admin-muted">验证通过后系统会给出新的二维码；用新验证器扫码并输入新验证码即完成更换。</p>
+          : <p className="admin-muted">验证通过后系统会给出二维码，扫码并输入验证码即完成绑定。</p>}
+    </form>}
+
+    {step === 'scan' && enrollment && <div className="enrollment-panel">
+      <p className="admin-muted">用验证器扫描下方二维码，或手动输入密钥，然后填写验证器生成的 6 位验证码完成绑定。二维码与密钥仅在本次显示，页面刷新后需重新开始。</p>
+      {qrData ? <img className="enrollment-qr" src={qrData} alt="动态验证码绑定二维码"/> : <div className="admin-empty">正在生成二维码…</div>}
+      <p className="enrollment-secret"><span>手动输入密钥</span><code>{enrollment.secret}</code></p>
+      <p className="admin-muted">该二维码将在 {new Date(enrollment.expires_at).toLocaleTimeString('zh-CN', { hour12: false })} 失效。</p>
+      <form className="admin-form" onSubmit={event => { event.preventDefault(); void confirm(); }}>
+        <label>验证器显示的验证码<input inputMode="numeric" autoComplete="one-time-code" required minLength={6} maxLength={6} value={confirmCode} onChange={e => setConfirmCode(e.target.value)}/></label>
+        <div className="admin-form-actions">
+          <button className="admin-secondary" type="button" onClick={reset} disabled={localBusy}>取消</button>
+          <button className="admin-primary" disabled={localBusy || confirmCode.trim().length !== 6}>{localBusy ? '正在验证…' : '完成绑定'}</button>
+        </div>
+      </form>
+    </div>}
+  </Panel>;
 }
 
 /** Creating further administrators and seeing who exists. Every administrator is

@@ -20,13 +20,14 @@ import (
 )
 
 var (
-	ErrInvalidUsername     = errors.New("username must be 3 to 64 letters, digits, dots, underscores or hyphens")
-	ErrInvalidCredentials  = errors.New("invalid credentials")
-	ErrUnauthenticated     = errors.New("unauthenticated")
-	ErrUsernameTaken       = errors.New("administrator username is already taken")
-	ErrSecondFactorPending = errors.New("no pending second factor enrollment")
-	ErrSecondFactorExpired = errors.New("pending second factor enrollment has expired")
-	usernamePattern        = regexp.MustCompile(`^[a-z0-9._-]{3,64}$`)
+	ErrInvalidUsername      = errors.New("username must be 3 to 64 letters, digits, dots, underscores or hyphens")
+	ErrInvalidCredentials   = errors.New("invalid credentials")
+	ErrUnauthenticated      = errors.New("unauthenticated")
+	ErrUsernameTaken        = errors.New("administrator username is already taken")
+	ErrSecondFactorNotBound = errors.New("administrator has no second factor binding")
+	ErrSecondFactorPending  = errors.New("no pending second factor enrollment")
+	ErrSecondFactorExpired  = errors.New("pending second factor enrollment has expired")
+	usernamePattern         = regexp.MustCompile(`^[a-z0-9._-]{3,64}$`)
 )
 
 // NormalizeUsername trims and lower-cases a requested administrator username, so
@@ -354,13 +355,18 @@ func (s *Service) StartEnrollment(ctx context.Context, principal Principal, pass
 		if !VerifyPassword(password, hash) {
 			return Enrollment{}, ErrInvalidCredentials
 		}
-		var secret []byte
-		if err := tx.QueryRowContext(ctx, `SELECT totp_secret FROM administrators WHERE id=?`, principal.ID).Scan(&secret); err != nil {
+		var currentSecret []byte
+		if err := tx.QueryRowContext(ctx, `SELECT totp_secret FROM administrators WHERE id=?`, principal.ID).Scan(&currentSecret); err != nil {
 			return Enrollment{}, err
 		}
-		if _, ok := matchTOTP(secret, currentCode, lastStep, time.Now().UTC()); !ok {
+		matchedStep, ok := matchTOTP(currentSecret, currentCode, lastStep, time.Now().UTC())
+		if !ok {
 			return Enrollment{}, ErrInvalidCredentials
 		}
+		// A replacement consumes the code it was authorised with, exactly as a
+		// login does, so one current code cannot start several replacements
+		// within the same 30-second step.
+		lastStep = matchedStep
 	}
 	secret, err := newTOTPSecret()
 	if err != nil {
@@ -368,8 +374,8 @@ func (s *Service) StartEnrollment(ctx context.Context, principal Principal, pass
 	}
 	now := time.Now().UTC()
 	stamp := now.Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, `UPDATE administrators SET totp_pending_secret=?,totp_pending_created_at=?,updated_at=?
-		WHERE id=?`, secret, stamp, stamp, principal.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE administrators SET totp_pending_secret=?,totp_pending_created_at=?,totp_last_step=?,updated_at=?
+		WHERE id=?`, secret, stamp, lastStep, stamp, principal.ID); err != nil {
 		return Enrollment{}, err
 	}
 	if err := store.RecordAudit(ctx, tx, principal.ID, "ADMIN_TOTP_ENROLLMENT_STARTED", "administrator",
@@ -442,6 +448,53 @@ func (s *Service) ConfirmEnrollment(ctx context.Context, principal Principal, co
 		return false, err
 	}
 	return bound == 1, nil
+}
+
+// RemoveSecondFactor unbinds the authenticator. It requires the current
+// password and a valid TOTP code, revokes every session and is audited.
+func (s *Service) RemoveSecondFactor(ctx context.Context, principal Principal, password, currentCode string) error {
+	if principal.ID < 1 || len(password) > 1024 || len(currentCode) > 128 {
+		return ErrInvalidCredentials
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var hash string
+	var secret []byte
+	var lastStep int64
+	err = tx.QueryRowContext(ctx, `SELECT password_hash,totp_secret,totp_last_step
+		FROM administrators WHERE id=? AND status='active'`, principal.ID).Scan(&hash, &secret, &lastStep)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrUnauthenticated
+	}
+	if err != nil {
+		return err
+	}
+	if len(secret) != 20 {
+		return ErrSecondFactorNotBound
+	}
+	if !VerifyPassword(password, hash) {
+		return ErrInvalidCredentials
+	}
+	if _, ok := matchTOTP(secret, currentCode, lastStep, time.Now().UTC()); !ok {
+		return ErrInvalidCredentials
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `UPDATE administrators SET totp_secret=NULL,totp_last_step=-1,
+		totp_pending_secret=NULL,totp_pending_created_at=NULL,updated_at=? WHERE id=?`,
+		now.Format(time.RFC3339Nano), principal.ID); err != nil {
+		return err
+	}
+	if _, err := revokeSessionsTx(ctx, tx, principal.ID, now); err != nil {
+		return err
+	}
+	if err := store.RecordAudit(ctx, tx, principal.ID, "ADMIN_TOTP_UNBOUND", "administrator",
+		strconv.FormatInt(principal.ID, 10), nil); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Service) failLoginWithDelay(ctx context.Context, id int64, reason string) error {
