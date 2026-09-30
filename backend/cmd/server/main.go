@@ -20,6 +20,7 @@ import (
 	"github.com/EziosWJ/canteen-wallet/backend/internal/meals"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/paymenttokens"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/recharges"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/settings"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/store"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/terminal"
 )
@@ -97,9 +98,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	settingsService := settings.New(db)
 	mealService := meals.New(db, location)
-	terminalService := terminal.New(db, mealService, location)
-	tokenService := paymenttokens.New(db)
+	terminalService := terminal.New(db, mealService, location, settingsService)
+	tokenService := paymenttokens.New(db, settingsService)
 	rechargeService := recharges.New(db)
 	backupService := &backups.Service{DB: db, DatabasePath: cfg.DatabasePath, ExternalDirectory: os.Getenv("CANTEEN_BACKUP_EXTERNAL_DIR")}
 	if backupService.ExternalDirectory != "" {
@@ -120,7 +122,7 @@ func run(logger *slog.Logger) error {
 			}
 		}()
 	}
-	publicServer := &http.Server{Handler: httpapi.Public(db, adminService, employeeService, mealService, tokenService, terminalService, rechargeService, backupService), ReadHeaderTimeout: 5 * time.Second}
+	publicServer := &http.Server{Handler: httpapi.Public(db, adminService, employeeService, mealService, tokenService, terminalService, rechargeService, backupService, settingsService), ReadHeaderTimeout: 5 * time.Second}
 	internalServer := &http.Server{Handler: httpapi.Internal(db, terminalService), ReadHeaderTimeout: 5 * time.Second}
 	type serveResult struct {
 		name string

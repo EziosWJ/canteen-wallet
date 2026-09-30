@@ -16,6 +16,7 @@ import (
 	"github.com/EziosWJ/canteen-wallet/backend/internal/ledger"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/meals"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/paymenttokens"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/settings"
 )
 
 var ErrUnauthorized = errors.New("terminal credential invalid")
@@ -27,10 +28,32 @@ type Service struct {
 	db       *sql.DB
 	meals    *meals.Service
 	location *time.Location
+	modes    ModesReader
 }
 
-func New(db *sql.DB, mealService *meals.Service, location *time.Location) *Service {
-	return &Service{db: db, meals: mealService, location: location}
+// ModesReader reads the enabled consumption entrances inside the caller's
+// transaction, so an entrance is checked against the same snapshot as the money
+// movement that follows. Service implements it in production.
+type ModesReader interface {
+	ModesTx(ctx context.Context, tx *sql.Tx) (settings.Modes, error)
+}
+
+func New(db *sql.DB, mealService *meals.Service, location *time.Location, modes ModesReader) *Service {
+	return &Service{db: db, meals: mealService, location: location, modes: modes}
+}
+
+// entranceEnabled reports whether an entrance accepts new consumption work. A
+// nil reader means no gate is configured, which only happens in tests that do
+// not exercise consumption modes.
+func (s *Service) entranceEnabled(ctx context.Context, tx *sql.Tx, isEnabled func(settings.Modes) bool) (bool, error) {
+	if s.modes == nil {
+		return true, nil
+	}
+	modes, err := s.modes.ModesTx(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	return isEnabled(modes), nil
 }
 
 type Result struct {
@@ -189,6 +212,16 @@ func (s *Service) Scan(ctx context.Context, terminalID, token string) (Result, e
 	}
 	if err := record.FirstUseAllowed(now); err != nil {
 		return s.commitScan(ctx, tx, meta, Result{Status: "FAILED", Code: "TOKEN_UNAVAILABLE", Message: "就餐码已过期或账户不可用"})
+	}
+	// A disabled payment-code entrance refuses new consumption work, but only
+	// after every replay branch above, so completed consumptions, recorded
+	// results and status lookups keep answering with their original outcome.
+	enabled, err := s.entranceEnabled(ctx, tx, func(m settings.Modes) bool { return m.PaymentCode })
+	if err != nil {
+		return Result{}, err
+	}
+	if !enabled {
+		return s.failScan(ctx, tx, meta, record, Result{Status: "FAILED", Code: "MODE_DISABLED", Message: "就餐码消费已关闭"})
 	}
 	period, err := s.meals.ActiveAtTx(ctx, tx, now)
 	if errors.Is(err, meals.ErrNoActivePeriod) {

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { adminApi, AdminApiError, readAdminSession, saveAdminSession, type AdminEmployee, type AdminMeal, type AdminSession } from './adminApi';
+import { adminApi, AdminApiError, readAdminSession, saveAdminSession, type AdminEmployee, type AdminMeal, type AdminSession, type ConsumptionModes } from './adminApi';
 import './admin.css';
 
-type Section = 'employees' | 'ledger' | 'meals' | 'terminals' | 'closing' | 'operations' | 'audit';
+type Section = 'employees' | 'ledger' | 'meals' | 'modes' | 'terminals' | 'closing' | 'operations' | 'audit';
 type LoadState = { busy: boolean; error: string; data: unknown };
 const emptyLoad: LoadState = { busy: false, error: '', data: null };
-const sectionLabels: Record<Section, string> = { employees: '人员与账户', ledger: '资金流水', meals: '餐次配置', terminals: '终端与事件', closing: '日结与复核', operations: '导入、补录与备份', audit: '审计记录' };
+const sectionLabels: Record<Section, string> = { employees: '人员与账户', ledger: '资金流水', meals: '餐次配置', modes: '消费模式', terminals: '终端与事件', closing: '日结与复核', operations: '导入、补录与备份', audit: '审计记录' };
 
 function message(error: unknown): string {
   if (!(error instanceof AdminApiError)) return '操作失败，请稍后重试。';
@@ -43,6 +43,36 @@ function Login({ onLogin }: { onLogin: (session: AdminSession) => void }) {
       <button className="admin-primary" disabled={busy}>{busy ? '正在验证…' : '安全登录'}</button>
     </form>
   </section></main>;
+}
+
+function ModeChoice({ modes, onChange, legend }: { modes: ConsumptionModes; onChange: (next: ConsumptionModes) => void; legend: string }) {
+  const options: { key: keyof ConsumptionModes; label: string; detail: string }[] = [
+    { key: 'payment_code', label: '就餐码消费', detail: '员工在食堂终端前出示动态码' },
+    { key: 'self_service', label: '自助消费', detail: '员工在自助入口自行确认扣款' },
+  ];
+  const enabledCount = options.filter(option => modes[option.key]).length;
+  return <fieldset className="mode-choice"><legend>{legend}</legend>
+    {options.map(option => <label key={option.key} className={`mode-option ${modes[option.key] ? 'on' : ''}`}>
+      <input type="checkbox" checked={modes[option.key]} disabled={modes[option.key] && enabledCount === 1}
+        onChange={event => onChange({ ...modes, [option.key]: event.target.checked })}/>
+      <span><b>{option.label}</b><small>{option.detail}</small></span>
+    </label>)}
+    <p className="admin-muted">至少保留一种消费模式；最后一种开启的模式不能关闭。</p>
+  </fieldset>;
+}
+
+function ConsumptionModeForm({ modes, busy, onSubmit }: { modes: ConsumptionModes; busy: boolean; onSubmit: (next: ConsumptionModes) => void }) {
+  const [draft, setDraft] = useState(modes);
+  // The page reloaded the modes, so the form must follow the server again.
+  useEffect(() => setDraft(modes), [modes]);
+  const changed = draft.payment_code !== modes.payment_code || draft.self_service !== modes.self_service;
+  return <form className="admin-form consumption-mode-form" onSubmit={event => { event.preventDefault(); onSubmit(draft); }}>
+    <ModeChoice modes={draft} onChange={setDraft} legend="当前启用的消费模式"/>
+    <div className="admin-form-actions">
+      {changed && <button className="admin-secondary" type="button" onClick={() => setDraft(modes)}>放弃修改</button>}
+      <button className="admin-primary" disabled={busy || !changed}>{busy ? '正在保存…' : '保存消费模式'}</button>
+    </div>
+  </form>;
 }
 
 function Panel({ title, description, children, action }: { title: string; description?: string; children: ReactNode; action?: ReactNode }) {
@@ -88,6 +118,7 @@ export default function Admin() {
   const [busy, setBusy] = useState(false);
   const [employees, setEmployees] = useState<AdminEmployee[]>([]);
   const [meals, setMeals] = useState<AdminMeal[]>([]);
+  const [modes, setModes] = useState<ConsumptionModes | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showEdit, setShowEdit] = useState<AdminEmployee | null>(null);
   const [showRecharge, setShowRecharge] = useState<AdminEmployee | null>(null);
@@ -102,9 +133,10 @@ export default function Admin() {
       let data: unknown;
       if (section === 'employees') { const response = await adminApi.employees(session); setEmployees(response.employees || []); data = response; }
       else if (section === 'meals') { const response = await adminApi.mealPeriods(session); setMeals(response.meal_periods || []); data = response; }
+      else if (section === 'modes') { const response = await adminApi.adminConsumptionModes(session); setModes(response); data = response; }
       else if (section === 'operations') { const [response, people] = await Promise.all([adminApi.generic<unknown>(session, '/api/admin/backups'), adminApi.employees(session)]); setEmployees(people.employees || []); data = response; }
       else {
-        const paths: Record<Exclude<Section, 'employees' | 'meals' | 'operations'>, string> = {
+        const paths: Record<Exclude<Section, 'employees' | 'meals' | 'operations' | 'modes'>, string> = {
           ledger: '/api/admin/transactions', terminals: '/api/admin/terminals',
           closing: `/api/admin/reconciliation/daily?business_date=${encodeURIComponent(businessDate)}`,
           audit: '/api/admin/audit-events',
@@ -157,6 +189,10 @@ export default function Admin() {
         </Panel>}
         {section === 'meals' && <Panel title="餐次配置" description="时间、价格变更由服务端检查重叠并记录审计。">
           {state.busy ? <Loading/> : state.error ? <ErrorBox retry={() => void load()}>{state.error}</ErrorBox> : <div className="meal-admin-list">{meals.map(meal => <MealEditor key={meal.code} meal={meal} busy={busy} onSave={next => runAction(() => adminApi.updateMeal(session, next), `${next.name}配置已保存。`)}/>)}</div>}
+        </Panel>}
+        {section === 'modes' && <Panel title="消费模式" description="决定员工可以使用哪些消费入口；修改立即生效并写入审计记录。">
+          {state.busy ? <Loading/> : state.error ? <ErrorBox retry={() => void load()}>{state.error}</ErrorBox> : modes ? <ConsumptionModeForm modes={modes} busy={busy} onSubmit={next => runAction(async () => { const saved = await adminApi.updateConsumptionModes(session, next); setModes(saved); }, '消费模式已更新，立即生效。')}/> : null}
+          <div className="admin-note"><h3>关闭入口时会发生什么</h3><ul><li>该入口已展示但尚未确认的扫码请求、自助消费意图会被终止，不会扣款。</li><li>重新开启后需要员工重新发起消费。</li><li>已完成的消费、历史流水查询和退款不受影响。</li></ul></div>
         </Panel>}
         {section === 'terminals' && <><Panel title="终端状态" description="设备心跳、扫码枪和服务状态由终端服务提供。">{state.busy ? <Loading/> : state.error ? <ErrorBox retry={() => void load()}>{state.error}</ErrorBox> : <Table rows={rowsFrom(state.data)}/>}</Panel><Panel title="扫码事件" description="仅展示脱敏事件摘要，不显示原始 Token。"><RemoteTable session={session} path="/api/admin/scan-events"/></Panel></>}
         {section === 'closing' && <><Panel title="每日余额日结" description="日结以资金变动公式核算，差异只告警，不自动修改账户余额。" action={<ExportButton session={session} kind="reconciliation"/>}><form className="admin-inline-form date-form" onSubmit={e => { e.preventDefault(); void load(); }}><label>营业日期<input type="date" value={businessDate} onChange={e => setBusinessDate(e.target.value)}/></label><button className="admin-secondary">查询日结</button><button className="admin-primary" type="button" disabled={busy} onClick={() => void runAction(() => adminApi.generic(session, '/api/admin/reconciliation/daily', { method: 'POST', body: JSON.stringify({ business_date: businessDate }) }), '日结已生成。')}>生成当日日结</button></form>{state.busy ? <Loading/> : state.error ? <ErrorBox retry={() => void load()}>{state.error}</ErrorBox> : <Table rows={rowsFrom(state.data)}/>}</Panel><ReceiptReviews session={session} onNotice={setNotice}/></>}

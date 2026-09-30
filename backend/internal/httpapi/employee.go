@@ -219,6 +219,8 @@ func employeeRoutes(public *http.ServeMux, service *employees.Service, tokenServ
 			WriteError(w, http.StatusForbidden, CodeAccountUnavailable, "account is unavailable for consumption")
 		case errors.Is(err, paymenttokens.ErrSessionInvalid):
 			employeeUnauthorized(w)
+		case errors.Is(err, paymenttokens.ErrEntranceDisabled):
+			WriteError(w, http.StatusConflict, CodeEntranceDisabled, "payment code consumption is disabled")
 		case errors.Is(err, paymenttokens.ErrPresentationUnavailable):
 			WriteError(w, http.StatusConflict, CodeInvalidState, "presentation unavailable")
 		case errors.Is(err, paymenttokens.ErrRefreshTooSoon):

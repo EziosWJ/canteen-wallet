@@ -12,6 +12,7 @@ export function messageFor(error: unknown): string {
     case 'PASSWORD_CHANGE_REQUIRED': return '请先修改临时密码。';
     case 'SERVICE_UNAVAILABLE': return '服务暂不可用，请稍后重试。';
     case 'REFRESH_TOO_SOON': return '就餐码更新过于频繁，请稍后再试。';
+    case 'ENTRANCE_DISABLED': return '食堂已关闭就餐码消费，请改用其他消费模式。';
     default: return error.status === 404 ? '所需服务尚未开放，请稍后再试。' : error.message;
   }
 }

@@ -38,6 +38,7 @@ import (
 	"github.com/EziosWJ/canteen-wallet/backend/internal/meals"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/paymenttokens"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/recharges"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/settings"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/store"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/terminal"
 )
@@ -111,15 +112,25 @@ func (e *env) startServers() {
 	e.t.Helper()
 	db, location := e.db, e.location
 	employeeService := employees.New(db)
+	settingsService := settings.New(db)
 	mealService := meals.New(db, location)
-	terminalService := terminal.New(db, mealService, location)
-	tokenService := paymenttokens.New(db)
+	terminalService := terminal.New(db, mealService, location, settingsService)
+	tokenService := paymenttokens.New(db, settingsService)
 	rechargeService := recharges.New(db)
 	backupService := &backups.Service{DB: db, DatabasePath: e.dbPath}
 	e.public = httptest.NewServer(httpapi.Public(db, e.admins, employeeService, mealService,
-		tokenService, terminalService, rechargeService, backupService))
+		tokenService, terminalService, rechargeService, backupService, settingsService))
 	e.internalHandle = httpapi.Internal(db, terminalService)
 	e.internal = httptest.NewServer(e.internalHandle)
+}
+
+// restartServers stops both listeners and starts fresh ones over the same
+// database, which is what an operator restarting the process looks like.
+func (e *env) restartServers() {
+	e.t.Helper()
+	e.public.Close()
+	e.internal.Close()
+	e.startServers()
 }
 
 // loginAdmin signs one administrator in and returns the bearer token. An empty
@@ -653,10 +664,10 @@ func (e *env) scan(credential, token string) scanResult {
 	return result
 }
 
-// postOnce is a goroutine-safe variant of post: it reports transport failures
-// through its error result instead of failing the test, because t.Fatalf must
-// only be called from the goroutine running the test.
-func (e *env) postOnce(base, path, token string, payload any) (apiResponse, error) {
+// requestOnce is a goroutine-safe variant of request: it reports transport
+// failures through its error result instead of failing the test, because
+// t.Fatalf must only be called from the goroutine running the test.
+func (e *env) requestOnce(method, base, path, token string, payload any) (apiResponse, error) {
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
@@ -665,7 +676,7 @@ func (e *env) postOnce(base, path, token string, payload any) (apiResponse, erro
 		}
 		body = bytes.NewReader(raw)
 	}
-	request, err := http.NewRequest(http.MethodPost, base+path, body)
+	request, err := http.NewRequest(method, base+path, body)
 	if err != nil {
 		return apiResponse{}, err
 	}
@@ -685,6 +696,16 @@ func (e *env) postOnce(base, path, token string, payload any) (apiResponse, erro
 		return apiResponse{}, err
 	}
 	return apiResponse{status: response.StatusCode, body: data}, nil
+}
+
+// postOnce and putOnce are the goroutine-safe senders the concurrency tests use:
+// a confirmation can race a mode change on either method.
+func (e *env) postOnce(base, path, token string, payload any) (apiResponse, error) {
+	return e.requestOnce(http.MethodPost, base, path, token, payload)
+}
+
+func (e *env) putOnce(base, path, token string, payload any) (apiResponse, error) {
+	return e.requestOnce(http.MethodPut, base, path, token, payload)
 }
 
 // decideOnce is a goroutine-safe variant of decide used by the concurrency

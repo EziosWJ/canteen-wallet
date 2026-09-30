@@ -1,3 +1,10 @@
+// The page-facing and admin-facing clients describe the same two entrances, so
+// ConsumptionModes is declared once in api.ts and re-exported here for the
+// admin modules that already depend on this file.
+import type { ConsumptionModes } from './api';
+
+export type { ConsumptionModes };
+
 export type AdminSession = {
   access_token: string;
   token_type: 'Bearer';
@@ -133,6 +140,12 @@ export const adminApi = {
   adjust(session: AdminSession, accountId: number, amountCents: number, reason: string, idempotencyKey: string) {
     return request<unknown>(`/api/admin/accounts/${accountId}/adjust`, session, { method: 'POST', body: JSON.stringify({ amount_cents: amountCents, reason, idempotency_key: idempotencyKey }) });
   },
+  adminConsumptionModes(session: AdminSession) { return request<ConsumptionModes>('/api/admin/settings/consumption-modes', session); },
+  updateConsumptionModes(session: AdminSession, modes: ConsumptionModes) {
+    return request<ConsumptionModes>('/api/admin/settings/consumption-modes', session,
+      { method: 'PUT', body: JSON.stringify(modes) });
+  },
+
   security(session: AdminSession) { return request<SecurityState>('/api/admin/security', session); },
   /** Starts a binding. Replacing an existing one needs the password and a
    * current code of the authenticator being replaced. */

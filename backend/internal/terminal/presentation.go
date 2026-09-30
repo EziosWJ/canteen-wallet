@@ -9,6 +9,7 @@ import (
 	"github.com/EziosWJ/canteen-wallet/backend/internal/employees"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/ledger"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/paymenttokens"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/settings"
 )
 
 type PresentationStatus struct {
@@ -113,6 +114,8 @@ func (s *Service) pendingResult(ctx context.Context, tx *sql.Tx, pending pending
 		result.Message = "余额不足"
 	case "ACCOUNT_UNAVAILABLE":
 		result.Message = "账户不可用"
+	case "MODE_DISABLED":
+		result.Message = "就餐码消费已关闭"
 	default:
 		result.Message = "确认已过期"
 	}
@@ -246,6 +249,21 @@ func (s *Service) decideEmployee(ctx context.Context, principal employees.Princi
 			return Result{}, err
 		}
 		result, err := s.pendingResult(ctx, tx, pendingRecordWithState(pending, "FAILED", "ACCOUNT_UNAVAILABLE"), now)
+		if err != nil {
+			return Result{}, err
+		}
+		return result, tx.Commit()
+	}
+	// Defensive re-check: turning the payment-code entrance off already finishes
+	// waiting confirmations, but a request that reaches this point while the
+	// entrance is off must not charge either.
+	if enabled, err := s.entranceEnabled(ctx, tx, func(m settings.Modes) bool { return m.PaymentCode }); err != nil {
+		return Result{}, err
+	} else if !enabled {
+		if err := s.finalizePending(ctx, tx, pending, "MODE_DISABLED"); err != nil {
+			return Result{}, err
+		}
+		result, err := s.pendingResult(ctx, tx, pendingRecordWithState(pending, "FAILED", "MODE_DISABLED"), now)
 		if err != nil {
 			return Result{}, err
 		}

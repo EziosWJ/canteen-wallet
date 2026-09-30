@@ -10,6 +10,7 @@ import (
 	"github.com/EziosWJ/canteen-wallet/backend/internal/employees"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/ledger"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/meals"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/settings"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/store"
 )
 
@@ -153,10 +154,20 @@ func (s *Service) cancelOwnPendingScans(ctx context.Context, tx *sql.Tx, employe
 // It returns Status UNAVAILABLE (and no intent) when the employee cannot consume
 // right now, so the page can explain why without offering a confirm action.
 func (s *Service) currentPreview(ctx context.Context, tx *sql.Tx, principal employees.Principal, now time.Time) (SelfServicePreview, error) {
+	// Both the preview and the confirmation resolve through here, so a disabled
+	// self-service entrance refuses new work in one place while completed
+	// consumptions still resolve earlier in each caller.
+	enabled, err := s.entranceEnabled(ctx, tx, func(m settings.Modes) bool { return m.SelfService })
+	if err != nil {
+		return SelfServicePreview{}, err
+	}
+	if !enabled {
+		return SelfServicePreview{Status: "UNAVAILABLE", Code: "MODE_DISABLED", Message: "自助消费已关闭"}, nil
+	}
 	var accountID int64
 	var employeeStatus, accountStatus string
 	var mustChange int
-	err := tx.QueryRowContext(ctx, `SELECT a.id,e.status,a.status,e.must_change_password
+	err = tx.QueryRowContext(ctx, `SELECT a.id,e.status,a.status,e.must_change_password
 		FROM employees e JOIN accounts a ON a.employee_id=e.id WHERE e.id=?`, principal.ID).
 		Scan(&accountID, &employeeStatus, &accountStatus, &mustChange)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -453,6 +464,8 @@ func selfServiceMessage(code string) string {
 		return "账户不可用"
 	case "NO_ACTIVE_PERIOD":
 		return "当前不在用餐时段"
+	case "MODE_DISABLED":
+		return "自助消费已关闭"
 	case "PREVIEW_CHANGED":
 		return "餐次信息已更新，请确认后再消费"
 	default:

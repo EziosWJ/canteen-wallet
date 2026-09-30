@@ -73,6 +73,12 @@ export type MealPeriod = {
   enabled: boolean;
 };
 
+/** Which consumption entrances the canteen currently offers. Administrators
+ * can switch either one off, so a page must ask before offering an entry.
+ * Hiding an entry is presentation only: the server refuses a direct request to
+ * a disabled entrance as well. */
+export type ConsumptionModes = { payment_code: boolean; self_service: boolean };
+
 /** Server-decided preview for the fixed self-service link. The meal, business
  * date, price and existing count all come from the server; intent_id is the
  * credential bound to this employee and this confirmation intent. */
@@ -279,5 +285,9 @@ export const api = {
   // same consumption from the server.
   selfServiceResult(session: Session, intentId: string) {
     return request<SelfServiceOutcome>(`/api/me/self-service/${encodeURIComponent(intentId)}/result`, {}, session);
+  },
+  /** The enabled entrances, read before a page offers an entry. */
+  consumptionModes() {
+    return request<ConsumptionModes>('/api/consumption-modes', {}, null);
   },
 };

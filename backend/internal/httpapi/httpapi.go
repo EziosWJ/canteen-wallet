@@ -13,6 +13,7 @@ import (
 	"github.com/EziosWJ/canteen-wallet/backend/internal/meals"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/paymenttokens"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/recharges"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/settings"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/store"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/terminal"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/webassets"
@@ -37,6 +38,7 @@ const (
 	CodeAlreadyReversed        Code = "ALREADY_REVERSED"
 	CodeInsufficientFunds      Code = "INSUFFICIENT_FUNDS"
 	CodePayoutConflict         Code = "PAYOUT_CONFLICT"
+	CodeEntranceDisabled       Code = "ENTRANCE_DISABLED"
 )
 
 type Error struct {
@@ -46,10 +48,11 @@ type Error struct {
 
 func Public(db *sql.DB, admins *adminauth.Service, employeeService *employees.Service,
 	mealService *meals.Service, tokenService *paymenttokens.Service, terminalService *terminal.Service,
-	rechargeService *recharges.Service, backupService *backups.Service) http.Handler {
+	rechargeService *recharges.Service, backupService *backups.Service, settingsService *settings.Service) http.Handler {
 	mux := http.NewServeMux()
 	healthRoutes(mux, db)
-	adminRoutes(mux, db, admins, employeeService, mealService, rechargeService, accounts.New(db), backupService)
+	adminRoutes(mux, db, admins, employeeService, mealService, rechargeService, accounts.New(db), backupService, settingsService)
+	publicSettingsRoutes(mux, settingsService)
 	employeeRoutes(mux, employeeService, tokenService, terminalService, ledger.New(db), mealService)
 	mux.HandleFunc("/api", notFound)
 	mux.HandleFunc("/api/", notFound)

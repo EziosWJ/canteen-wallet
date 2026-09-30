@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import { api, ApiError, clearPaymentCache, paymentCacheKey, readPaymentCache, savePaymentCache,
   type Employee, type PaymentPresentation, type PaymentToken, type Session } from './api';
+import { Icon } from './icons';
 
 function money(cents = 0): string { return `¥${(cents / 100).toFixed(2)}`; }
 function dateTime(value?: string): string {
@@ -15,7 +16,14 @@ function errorMessage(error: unknown): string {
   if (!(error instanceof ApiError)) return '请求失败，请稍后重试。';
   if (error.code === 'NETWORK') return '手机暂时无法连接服务；当前就餐码在到期前仍可出示。';
   if (error.code === 'REFRESH_TOO_SOON') return '正在等待下一个就餐码。';
+  if (error.code === 'ENTRANCE_DISABLED') return '食堂已关闭就餐码消费，请改用其他消费模式。';
   return error.message;
+}
+
+/** An entrance an administrator closed mid-session is a final state, not a
+ * transient failure: retrying would only ask the server to refuse again. */
+function entranceClosed(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'ENTRANCE_DISABLED';
 }
 
 export default function PaymentCode({ session, employee, onExpired, onForced }: {
@@ -28,6 +36,8 @@ export default function PaymentCode({ session, employee, onExpired, onForced }: 
   const [offsetMs, setOffsetMs] = useState(initial?.offset_ms || 0);
   const [qrData, setQrData] = useState('');
   const [message, setMessage] = useState('');
+  const [closed, setClosed] = useState(false);
+  const closedRef = useRef(false);
   const [now, setNow] = useState(Date.now());
   const [deciding, setDeciding] = useState(false);
   const active = useRef(false);
@@ -71,6 +81,15 @@ export default function PaymentCode({ session, employee, onExpired, onForced }: 
       if (!active.current) return;
       if (reason instanceof ApiError && reason.status === 401) { onExpired(); return; }
       if (reason instanceof ApiError && reason.code === 'PASSWORD_CHANGE_REQUIRED') { onForced(); return; }
+      if (entranceClosed(reason)) {
+        // The entrance was switched off while this page was open. Stop asking
+        // for codes and tell the employee why; the server refuses every retry,
+        // so retrying on the timer would only repeat the same refusal.
+        clearPaymentCache(session);
+        apply(null, '', null, offsetRef.current);
+        closedRef.current = true; setClosed(true); setMessage(errorMessage(reason));
+        return;
+      }
       if (reason instanceof ApiError && reason.code === 'REFRESH_TOO_SOON' && reason.presentationId && !idRef.current) {
         apply(null, reason.presentationId, null, offsetRef.current);
       }
@@ -114,7 +133,7 @@ export default function PaymentCode({ session, employee, onExpired, onForced }: 
     void syncStatus();
     const timer = window.setInterval(() => {
       const tick = Date.now(); setNow(tick);
-      if (document.visibilityState !== 'visible') return;
+      if (document.visibilityState !== 'visible' || closedRef.current) return;
       if (statusRef.current && (statusRef.current.state === 'SUCCESS' || statusRef.current.state === 'FAILED')) return;
       if (tick - lastStatusAt.current >= 2000) void syncStatus();
       if (!initialized.current) return;
@@ -177,6 +196,10 @@ export default function PaymentCode({ session, employee, onExpired, onForced }: 
   const seconds = token ? Math.max(0, Math.ceil((Date.parse(token.refresh_after) - now - offsetMs) / 1000)) : 0;
   const result = status?.result;
   const state = status?.state;
+
+  if (closed) return <div className="page qr-page"><header className="page-heading"><h1>我的就餐码</h1><p>在食堂终端前出示动态码</p></header>
+    <section className="surface code-card"><div className="payment-outcome"><span className="notice-symbol"><Icon name="alert" size={27}/></span><h2>就餐码消费已关闭</h2><p>{message || '食堂已关闭就餐码消费，请改用其他消费模式。'}</p><button className="outline-button" type="button" onClick={() => { closedRef.current = false; setClosed(false); initialized.current = true; void syncStatus(); }}>重新检查</button></div></section>
+  </div>;
 
   return <div className="page qr-page"><header className="page-heading"><h1>我的就餐码</h1><p>在食堂终端前出示动态码</p></header>
     <section className="surface code-card"><div className="code-top"><span>{employee.account_status === 'ACTIVE' ? '账户正常' : '账户暂不可用'}</span><span>{state === 'PENDING' ? '等待本人确认' : state === 'SUCCESS' ? '消费已完成' : '动态更新'}</span></div>

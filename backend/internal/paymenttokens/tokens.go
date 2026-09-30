@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/EziosWJ/canteen-wallet/backend/internal/employees"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/settings"
 )
 
 var (
@@ -23,6 +24,7 @@ var (
 	ErrTokenProcessed          = errors.New("payment token was already processed")
 	ErrRefreshTooSoon          = errors.New("payment token refresh requested too soon")
 	ErrPresentationUnavailable = errors.New("payment presentation unavailable")
+	ErrEntranceDisabled        = errors.New("payment code entrance is disabled")
 )
 
 const (
@@ -80,9 +82,19 @@ func (record Record) FirstUseAllowed(at time.Time) error {
 	return nil
 }
 
-type Service struct{ db *sql.DB }
+type Service struct {
+	db    *sql.DB
+	modes ModesReader
+}
 
-func New(db *sql.DB) *Service { return &Service{db: db} }
+// ModesReader reads the enabled consumption entrances inside the caller's
+// transaction, so issuing a payment code observes the same configuration as the
+// scan that will charge it.
+type ModesReader interface {
+	ModesTx(ctx context.Context, tx *sql.Tx) (settings.Modes, error)
+}
+
+func New(db *sql.DB, modes ModesReader) *Service { return &Service{db: db, modes: modes} }
 
 func (s *Service) Issue(ctx context.Context, principal employees.Principal, presentationID string) (Token, error) {
 	if principal.MustChangePassword {
@@ -96,6 +108,17 @@ func (s *Service) Issue(ctx context.Context, principal employees.Principal, pres
 		return Token{}, err
 	}
 	defer tx.Rollback()
+	if s.modes != nil {
+		modes, err := s.modes.ModesTx(ctx, tx)
+		if err != nil {
+			return Token{}, err
+		}
+		// A disabled payment-code entrance hands out no new scannable code. The
+		// employee page hides the entry as well, but this check is authoritative.
+		if !modes.PaymentCode {
+			return Token{}, ErrEntranceDisabled
+		}
+	}
 	now := time.Now().UTC().Truncate(time.Second)
 	requestedNew := presentationID == ""
 	if presentationID == "" {

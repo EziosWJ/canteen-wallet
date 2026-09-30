@@ -12,7 +12,13 @@ import (
 	"time"
 )
 
-// Each numbered file contains one SQL statement. Migrations are append-only.
+// Each numbered file contains exactly one SQL statement. (Files up to 0063
+// predate that rule and group several statements; they cannot be split now
+// without breaking the checksum of databases that already applied them, so the
+// rule applies to new migrations only.) Files are applied in name order on a
+// single connection inside one transaction, so a partially applied migration
+// cannot be recorded. Migrations are append-only: once a file has been applied
+// its checksum is verified, and changing the file is an error.
 //
 //go:embed migrations/*.sql
 var migrationFiles embed.FS

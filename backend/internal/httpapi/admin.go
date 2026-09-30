@@ -15,9 +15,10 @@ import (
 	"github.com/EziosWJ/canteen-wallet/backend/internal/employees"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/meals"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/recharges"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/settings"
 )
 
-func adminRoutes(public *http.ServeMux, db *sql.DB, admins *adminauth.Service, employeeService *employees.Service, mealService *meals.Service, rechargeService *recharges.Service, accountService *accounts.Service, backupService *backups.Service) {
+func adminRoutes(public *http.ServeMux, db *sql.DB, admins *adminauth.Service, employeeService *employees.Service, mealService *meals.Service, rechargeService *recharges.Service, accountService *accounts.Service, backupService *backups.Service, settingsService *settings.Service) {
 	public.HandleFunc("/api/admin/login", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if r.Method != http.MethodPost {
@@ -92,6 +93,7 @@ func adminRoutes(public *http.ServeMux, db *sql.DB, admins *adminauth.Service, e
 	})
 	adminEmployeeRoutes(admin, employeeService)
 	adminSecurityRoutes(admin, admins)
+	adminSettingsRoutes(admin, settingsService)
 	adminMealRoutes(admin, mealService)
 	adminRechargeRoutes(admin, rechargeService)
 	adminAccountRoutes(admin, accountService)
