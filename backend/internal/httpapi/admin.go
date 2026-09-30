@@ -93,6 +93,7 @@ func adminRoutes(public *http.ServeMux, db *sql.DB, admins *adminauth.Service, e
 	})
 	adminEmployeeRoutes(admin, employeeService)
 	adminSecurityRoutes(admin, admins)
+	adminAdministratorRoutes(admin, admins)
 	adminSettingsRoutes(admin, settingsService)
 	adminMealRoutes(admin, mealService)
 	adminRechargeRoutes(admin, rechargeService)

@@ -52,6 +52,13 @@ export type SecondFactorEnrollment = {
   replacement: boolean;
 };
 
+export type AdminAccount = {
+  id: number;
+  username: string;
+  second_factor_bound: boolean;
+  created_at: string;
+};
+
 export class AdminApiError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
 }
@@ -163,6 +170,12 @@ export const adminApi = {
     return request<{ second_factor_bound: boolean; sessions_revoked: boolean }>(
       '/api/admin/security/second-factor', session,
       { method: 'DELETE', body: JSON.stringify({ password, second_factor_code: currentCode }) });
+  },
+
+  administrators(session: AdminSession) { return request<{ administrators: AdminAccount[] }>('/api/admin/administrators', session); },
+  createAdministrator(session: AdminSession, username: string, password: string) {
+    return request<{ administrator: AdminAccount }>('/api/admin/administrators', session,
+      { method: 'POST', body: JSON.stringify({ username, password }) });
   },
 
   generic<T>(session: AdminSession, path: string, options: RequestInit = {}) { return request<T>(path, session, options); },

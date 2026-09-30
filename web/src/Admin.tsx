@@ -1,11 +1,24 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { adminApi, AdminApiError, readAdminSession, saveAdminSession, type AdminEmployee, type AdminMeal, type AdminSession, type ConsumptionModes } from './adminApi';
+import { adminApi, AdminApiError, readAdminSession, saveAdminSession, type AdminAccount, type AdminEmployee, type AdminMeal, type AdminSession, type ConsumptionModes } from './adminApi';
 import './admin.css';
 
-type Section = 'employees' | 'ledger' | 'meals' | 'modes' | 'terminals' | 'closing' | 'operations' | 'audit';
+type Section = 'employees' | 'ledger' | 'meals' | 'modes' | 'terminals' | 'closing' | 'operations' | 'security' | 'audit';
 type LoadState = { busy: boolean; error: string; data: unknown };
 const emptyLoad: LoadState = { busy: false, error: '', data: null };
-const sectionLabels: Record<Section, string> = { employees: '人员与账户', ledger: '资金流水', meals: '餐次配置', modes: '消费模式', terminals: '终端与事件', closing: '日结与复核', operations: '导入、补录与备份', audit: '审计记录' };
+const sectionLabels: Record<Section, string> = { employees: '人员与账户', ledger: '资金流水', meals: '餐次配置', modes: '消费模式', terminals: '终端与事件', closing: '日结与复核', operations: '导入、补录与备份', security: '管理员与安全', audit: '审计记录' };
+
+/** The message shown when the server refuses something the page could have
+ * predicted. Every security endpoint answers with a code, and the code is the
+ * stable contract; the message is only a fallback. */
+function securityMessage(error: unknown): string {
+  if (!(error instanceof AdminApiError)) return '操作失败，请稍后重试。';
+  switch (error.code) {
+    case 'INVALID_CREDENTIALS': return '密码或当前动态验证码不正确。';
+    case 'INVALID_STATE': return error.message;
+    case 'CONFLICT': return error.message;
+    default: return message(error);
+  }
+}
 
 function message(error: unknown): string {
   if (!(error instanceof AdminApiError)) return '操作失败，请稍后重试。';
@@ -119,6 +132,8 @@ export default function Admin() {
   const [employees, setEmployees] = useState<AdminEmployee[]>([]);
   const [meals, setMeals] = useState<AdminMeal[]>([]);
   const [modes, setModes] = useState<ConsumptionModes | null>(null);
+  const [accounts, setAccounts] = useState<AdminAccount[]>([]);
+  const [me, setMe] = useState<{ id: number; username: string } | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showEdit, setShowEdit] = useState<AdminEmployee | null>(null);
   const [showRecharge, setShowRecharge] = useState<AdminEmployee | null>(null);
@@ -133,10 +148,11 @@ export default function Admin() {
       let data: unknown;
       if (section === 'employees') { const response = await adminApi.employees(session); setEmployees(response.employees || []); data = response; }
       else if (section === 'meals') { const response = await adminApi.mealPeriods(session); setMeals(response.meal_periods || []); data = response; }
+      else if (section === 'security') { const people = await adminApi.administrators(session); setAccounts(people.administrators || []); data = people; }
       else if (section === 'modes') { const response = await adminApi.adminConsumptionModes(session); setModes(response); data = response; }
       else if (section === 'operations') { const [response, people] = await Promise.all([adminApi.generic<unknown>(session, '/api/admin/backups'), adminApi.employees(session)]); setEmployees(people.employees || []); data = response; }
       else {
-        const paths: Record<Exclude<Section, 'employees' | 'meals' | 'operations' | 'modes'>, string> = {
+        const paths: Record<Exclude<Section, 'employees' | 'meals' | 'operations' | 'modes' | 'security'>, string> = {
           ledger: '/api/admin/transactions', terminals: '/api/admin/terminals',
           closing: `/api/admin/reconciliation/daily?business_date=${encodeURIComponent(businessDate)}`,
           audit: '/api/admin/audit-events',
@@ -156,7 +172,7 @@ export default function Admin() {
 
   useEffect(() => {
     if (!session) return;
-    adminApi.me(session).then(value => setIdentity(value.username)).catch(reason => { if (reason instanceof AdminApiError && reason.status === 401) expire(); else setIdentity(session.administrator.username); });
+    adminApi.me(session).then(value => { setIdentity(value.username); setMe({ id: value.id, username: value.username }); }).catch(reason => { if (reason instanceof AdminApiError && reason.status === 401) expire(); else setIdentity(session.administrator.username); });
   }, [session, expire]);
   useEffect(() => { void load(); }, [load]);
 
@@ -194,6 +210,9 @@ export default function Admin() {
           {state.busy ? <Loading/> : state.error ? <ErrorBox retry={() => void load()}>{state.error}</ErrorBox> : modes ? <ConsumptionModeForm modes={modes} busy={busy} onSubmit={next => runAction(async () => { const saved = await adminApi.updateConsumptionModes(session, next); setModes(saved); }, '消费模式已更新，立即生效。')}/> : null}
           <div className="admin-note"><h3>关闭入口时会发生什么</h3><ul><li>该入口已展示但尚未确认的扫码请求、自助消费意图会被终止，不会扣款。</li><li>重新开启后需要员工重新发起消费。</li><li>已完成的消费、历史流水查询和退款不受影响。</li></ul></div>
         </Panel>}
+        {section === 'security' && <>
+          <AdministratorPanel session={session} me={me} accounts={accounts} busy={busy} onNotice={setNotice} onChanged={() => void load()}/>
+        </>}
         {section === 'terminals' && <><Panel title="终端状态" description="设备心跳、扫码枪和服务状态由终端服务提供。">{state.busy ? <Loading/> : state.error ? <ErrorBox retry={() => void load()}>{state.error}</ErrorBox> : <Table rows={rowsFrom(state.data)}/>}</Panel><Panel title="扫码事件" description="仅展示脱敏事件摘要，不显示原始 Token。"><RemoteTable session={session} path="/api/admin/scan-events"/></Panel></>}
         {section === 'closing' && <><Panel title="每日余额日结" description="日结以资金变动公式核算，差异只告警，不自动修改账户余额。" action={<ExportButton session={session} kind="reconciliation"/>}><form className="admin-inline-form date-form" onSubmit={e => { e.preventDefault(); void load(); }}><label>营业日期<input type="date" value={businessDate} onChange={e => setBusinessDate(e.target.value)}/></label><button className="admin-secondary">查询日结</button><button className="admin-primary" type="button" disabled={busy} onClick={() => void runAction(() => adminApi.generic(session, '/api/admin/reconciliation/daily', { method: 'POST', body: JSON.stringify({ business_date: businessDate }) }), '日结已生成。')}>生成当日日结</button></form>{state.busy ? <Loading/> : state.error ? <ErrorBox retry={() => void load()}>{state.error}</ErrorBox> : <Table rows={rowsFrom(state.data)}/>}</Panel><ReceiptReviews session={session} onNotice={setNotice}/></>}
         {section === 'operations' && <><Panel title="人员 Excel 导入" description="先由服务端校验并预览行级结果，再确认创建有效行；错误行会保留在报告中。"><ImportPanel session={session} onNotice={setNotice}/></Panel><Panel title="故障供餐登记与补录" description="保存唯一凭据和营业日期。待处理记录经核对后单独补录为 CONSUME 交易。"><ManualSupply session={session} employees={employees} onNotice={setNotice}/></Panel><Panel title="备份管理" description="备份由服务端执行 SQLite 一致性备份并报告结果。"><div className="admin-inline-actions"><button className="admin-primary" disabled={busy} onClick={() => void runAction(() => adminApi.generic(session, '/api/admin/backups', { method: 'POST', body: '{}' }), '立即备份请求已提交。')}>立即备份</button><button className="admin-secondary" onClick={() => void load()}>刷新备份记录</button></div>{state.busy ? <Loading/> : state.error ? <ErrorBox retry={() => void load()}>{state.error}</ErrorBox> : <Table rows={rowsFrom(state.data)}/>}</Panel><Panel title="导出数据" description="导出由服务端生成，浏览器不重算金额。"><div className="export-grid">{['employees', 'balances', 'transactions', 'reconciliation'].map(kind => <ExportButton key={kind} session={session} kind={kind}/>)}</div></Panel></>}
@@ -332,6 +351,43 @@ function ImportPanel({ session, onNotice }: { session: AdminSession; onNotice: (
     finally { setBusy(false); }
   }
   return <div className="admin-import"><p className="admin-muted import-template">Excel 首行使用列名：employee_no、name、phone、department、status。status 可为 ACTIVE 或 FROZEN。</p><label className="file-picker">选择 Excel 文件<input type="file" accept=".xlsx" onChange={e => { setFile(e.target.files?.[0] || null); setPreview(null); setCreated([]); setConfirmed(false); }}/></label><button className="admin-secondary" disabled={!file || busy} onClick={() => void previewFile()}>{busy ? '正在校验…' : '上传并预览'}</button>{preview != null && <><p className="admin-muted">校验结果由服务端返回，请核对正确行和错误行。</p><Table rows={preview.rows}/>{preview.errors.length > 0 && <><p className="inline-error">错误行报告</p><Table rows={preview.errors}/><ExportButton session={session} kind="error-report" path={`/api/admin/imports/${encodeURIComponent(preview.preview_id)}/errors`} filename="import-errors.csv"/></>}{!confirmed && <button className="admin-primary" disabled={busy} onClick={() => void confirmImport()}>确认导入有效行</button>}{created.length > 0 && <><p className="admin-muted">以下临时密码只在当前页面显示；请通过安全渠道交付给对应员工。</p><Table rows={created}/></>}</>}</div>;
+}
+
+/** Creating further administrators and seeing who exists. Every administrator is
+ * equal: there is deliberately no role or permission tier. */
+function AdministratorPanel({ session, me, accounts, busy, onNotice, onChanged }: {
+  session: AdminSession; me: { id: number; username: string } | null; accounts: AdminAccount[];
+  busy: boolean; onNotice: (value: string) => void; onChanged: () => void;
+}) {
+  const [showCreate, setShowCreate] = useState(false);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [localBusy, setLocalBusy] = useState(false);
+
+  async function create(event: FormEvent) {
+    event.preventDefault();
+    if (password.length < 12) { onNotice('初始密码至少需要 12 个字符。'); return; }
+    setLocalBusy(true); onNotice('');
+    try {
+      const created = await adminApi.createAdministrator(session, username.trim(), password);
+      onNotice(`管理员 ${created.administrator.username} 已创建。请通过安全渠道交付初始密码；该账号未绑定动态验证码，首次登录后可在“管理员与安全”中自行绑定。`);
+      setShowCreate(false); setUsername(''); setPassword('');
+      onChanged();
+    } catch (reason) { onNotice(securityMessage(reason)); }
+    finally { setLocalBusy(false); }
+  }
+
+  return <Panel title="管理员账号" description="所有管理员权限相同，没有角色区分。新建账号初始未绑定动态验证码。" action={<button className="admin-primary compact" type="button" onClick={() => setShowCreate(true)}>新建管理员</button>}>
+    {accounts.length ? <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>账号</th><th>动态验证码</th><th>创建时间</th></tr></thead><tbody>{accounts.map(item => <tr key={item.id}><td>{item.username}{me?.id === item.id && <span className="admin-muted"> （当前登录）</span>}</td><td><span className={`admin-status ${item.second_factor_bound ? 'ok' : 'warn'}`}>{item.second_factor_bound ? '已绑定' : '未绑定'}</span></td><td>{item.created_at ? new Date(item.created_at).toLocaleString('zh-CN', { hour12: false }) : '—'}</td></tr>)}</tbody></table></div> : <div className="admin-empty">暂无管理员记录</div>}
+    <p className="admin-muted">其他管理员的动态验证码无法由这里代为设置、查看或解除；每位管理员只能管理自己的绑定。</p>
+    {showCreate && <Modal title="新建管理员" onClose={() => setShowCreate(false)}>
+      <form className="admin-form" onSubmit={create}>
+        <label>管理员账号<input autoComplete="off" required minLength={3} maxLength={64} pattern="[a-z0-9._\-]+" value={username} onChange={e => setUsername(e.target.value)}/><small className="admin-muted">3–64 位小写字母、数字、点、下划线或短横线。</small></label>
+        <label>初始密码<input type="password" autoComplete="new-password" required minLength={12} value={password} onChange={e => setPassword(e.target.value)}/><small className="admin-muted">至少 12 个字符，请通过安全渠道交付。</small></label>
+        <div className="admin-form-actions"><button className="admin-secondary" type="button" onClick={() => setShowCreate(false)} disabled={localBusy}>取消</button><button className="admin-primary" disabled={localBusy || busy}>{localBusy ? '正在创建…' : '创建管理员'}</button></div>
+      </form>
+    </Modal>}
+  </Panel>;
 }
 
 function ExportButton({ session, kind, path, filename }: { session: AdminSession; kind: string; path?: string; filename?: string }) {

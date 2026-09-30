@@ -23,10 +23,22 @@ var (
 	ErrInvalidUsername     = errors.New("username must be 3 to 64 letters, digits, dots, underscores or hyphens")
 	ErrInvalidCredentials  = errors.New("invalid credentials")
 	ErrUnauthenticated     = errors.New("unauthenticated")
+	ErrUsernameTaken       = errors.New("administrator username is already taken")
 	ErrSecondFactorPending = errors.New("no pending second factor enrollment")
 	ErrSecondFactorExpired = errors.New("pending second factor enrollment has expired")
 	usernamePattern        = regexp.MustCompile(`^[a-z0-9._-]{3,64}$`)
 )
+
+// NormalizeUsername trims and lower-cases a requested administrator username, so
+// every entry point stores and compares the same spelling.
+func NormalizeUsername(username string) string {
+	return strings.ToLower(strings.TrimSpace(username))
+}
+
+// ValidUsername reports whether a normalized administrator username is
+// acceptable. Only the character set and length are enforced here; uniqueness is
+// decided inside the transaction that inserts the row.
+func ValidUsername(username string) bool { return usernamePattern.MatchString(username) }
 
 const sessionDuration = 12 * time.Hour
 const failedLoginDelay = 500 * time.Millisecond
@@ -84,8 +96,8 @@ func New(db *sql.DB, factor SecondFactor) *Service {
 }
 
 func (s *Service) CreateAdmin(ctx context.Context, username, password string) (int64, error) {
-	username = strings.ToLower(strings.TrimSpace(username))
-	if !usernamePattern.MatchString(username) {
+	username = NormalizeUsername(username)
+	if !ValidUsername(username) {
 		return 0, ErrInvalidUsername
 	}
 	hash, err := HashPassword(password)
@@ -123,6 +135,86 @@ func (s *Service) CreateAdmin(ctx context.Context, username, password string) (i
 		return 0, err
 	}
 	return id, nil
+}
+
+// CreateAdministratorByActor is the admin-UI path for creating a further
+// administrator. The new account has no second factor binding and can sign in
+// with the initial password. The audit event records the acting administrator
+// and never the initial password or its hash.
+func (s *Service) CreateAdministratorByActor(ctx context.Context, actorID int64, username, password string) (int64, error) {
+	username = NormalizeUsername(username)
+	if actorID < 1 {
+		return 0, ErrUnauthenticated
+	}
+	if !ValidUsername(username) {
+		return 0, ErrInvalidUsername
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var existing int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM administrators WHERE lower(username)=?`, username).Scan(&existing); err != nil {
+		return 0, err
+	}
+	if existing > 0 {
+		return 0, ErrUsernameTaken
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `INSERT INTO administrators (username, password_hash, created_at, updated_at)
+		VALUES (?, ?, ?, ?)`, username, hash, now, now)
+	if err != nil {
+		return 0, fmt.Errorf("create administrator: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if err := store.RecordAudit(ctx, tx, actorID, "ADMIN_ACCOUNT_CREATED", "administrator",
+		strconv.FormatInt(id, 10), map[string]any{"source": "admin_api", "created_username": username}); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// AdministratorSummary is the account list the admin UI shows. Binding status is
+// included so an administrator can see whether a colleague has adopted the
+// optional second factor.
+type AdministratorSummary struct {
+	ID                int64  `json:"id"`
+	Username          string `json:"username"`
+	SecondFactorBound bool   `json:"second_factor_bound"`
+	CreatedAt         string `json:"created_at"`
+}
+
+// List returns every administrator account.
+func (s *Service) List(ctx context.Context) ([]AdministratorSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, username,
+		CASE WHEN totp_secret IS NULL THEN 0 ELSE 1 END, created_at
+		FROM administrators ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]AdministratorSummary, 0)
+	for rows.Next() {
+		var item AdministratorSummary
+		var bound int
+		if err := rows.Scan(&item.ID, &item.Username, &bound, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.SecondFactorBound = bound == 1
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s *Service) Login(ctx context.Context, username, password, secondFactorProof string) (Session, error) {
