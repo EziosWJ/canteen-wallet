@@ -2,7 +2,7 @@
 
 公司内部单食堂的员工储值餐费系统。员工通过手机 H5 展示动态就餐码，现场终端扫码后按餐次扣款；管理员处理线下充值、退款、结清与对账。
 
-**实施状态：**[SPEC-001](https://github.com/EziosWJ/canteen-wallet/issues/1) 与 CW-01 至 CW-19 任务已经建立；CW-01 至 CW-10、CW-13 至 CW-18 的开发入口已落地。现场设备、浏览器流程、备份恢复和故障演练仍需人工验收。编译通过不代表业务或现场验收通过。
+**实施状态：**[SPEC-001](https://github.com/EziosWJ/canteen-wallet/issues/1) 与 CW-01 至 CW-19 任务已经建立；CW-01 至 CW-10、CW-13 至 CW-18 的开发入口已落地，[SPEC-004](https://github.com/EziosWJ/canteen-wallet/issues/28)（管理员初始化、可选双因素与消费模式配置）已实现。现场设备、浏览器流程、备份恢复和故障演练仍需人工验收。编译通过不代表业务或现场验收通过。
 
 ## 实施基线
 
@@ -29,7 +29,11 @@ Vite 将 `/api` 代理到 `127.0.0.1:8080`；`CANTEEN_WEB_API_TARGET` 可改代�
 
 ## 已有接口与约束
 
-首次管理员在 `backend/` 运行 `go run ./cmd/server create-admin <username>` 建立。密码由终端隐藏输入并确认，不作为命令参数。每位管理员需运行 `canteen-server enroll-admin-totp <username>` 设置独立第二因素，然后通过 `POST /api/admin/login` 的 `second_factor_code` 获取 12 小时 Bearer 会话。TOTP 丢失时同一 CLI 命令受审计地重置密钥并撤销旧会话。公开入口还需在反向代理限制登录请求速率。
+系统没有任何管理员时，后台页自动进入初始化页：`GET /api/bootstrap/status` 报告 `required`，`POST /api/bootstrap` 接收 `username`、`password`、`payment_code` 与 `self_service`，在单个事务内创建首位管理员并落定消费模式，返回可直接使用的 Bearer 会话和 `next_step`（`configure_meal_periods`）。一旦存在管理员，状态接口不再要求初始化，创建接口返回 409 `ALREADY_INITIALIZED`；并发或重复提交只会产生一个账号。没有后台入口时也可在 `backend/` 运行 `go run ./cmd/server create-admin <username>`，密码由终端隐藏输入并确认，不作为命令参数。
+
+管理员登录用 `POST /api/admin/login` 获取 12 小时 Bearer 会话。动态验证码（TOTP）是**可选**绑定：未绑定的管理员只凭密码登录，已绑定的必须同时在 `second_factor_code` 提交有效验证码。管理员可在后台“管理员与安全”页自助绑定、更换或解绑自己的验证码，更换与解绑均需当前密码和当前验证码；绑定变更会注销该管理员的全部会话并写入审计。验证器遗失时由运维在服务器执行 `canteen-server recover-admin-totp <username>`：无需旧验证码，清除已绑定和待绑定密钥、注销该账号全部会话并记录 `ADMIN_TOTP_RECOVERED` 审计，只影响指定账号，之后该管理员可凭密码登录并重新绑定。公网入口还需在反向代理限制登录请求速率。
+
+消费模式决定员工可使用哪些消费入口，由管理员在后台配置。`GET /api/consumption-modes`（公开）与 `GET`、`PUT /api/admin/settings/consumption-modes` 读写 `payment_code` 和 `self_service`，两者不能同时关闭。变更立即生效并写入审计；关闭入口会终止该入口下尚未确认的扫码请求和自助消费意图且不扣款，已完成的消费、历史查询与退款不受影响。管理员还可用 `GET`、`POST /api/admin/administrators` 查看全部账号或创建同权限管理员；新建账号初始未绑定验证码。所有管理员权限相同，没有角色分级。
 
 管理员可通过 `/api/admin/employees` 建档和查询，通过 `/api/admin/employees/{id}` 查看、调整状态及重置临时密码；临时密码只返回一次。`POST /api/admin/recharges` 确认带凭据的线下充值，`POST /api/admin/recharges/{id}/reverse` 冲正。`POST /api/admin/accounts/{id}/adjust` 接收带符号的 `amount_cents`、`reason`、`idempotency_key`；`POST /api/admin/accounts/{id}/withdraw` 接收 `payout_ref`、`paid_at`、`payment_method`、`idempotency_key`，关户后的历史退款结清可另带 `related_refund_transaction_id`。零余额直接关户仍使用员工状态接口。资金操作均由后端写入流水和审计，不能直接改余额。
 

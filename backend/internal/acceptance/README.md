@@ -1,10 +1,12 @@
-# 验收测试（SPEC-002 #21、SPEC-003 #22）
+# 验收测试（SPEC-002 #21、SPEC-003 #22、SPEC-004 #28）
 
-本目录是可自动化验收套件，覆盖两批规格：
+本目录是可自动化验收套件，覆盖三批规格：
 
 - **SPEC-002**（#21）「就餐码恢复、扫码结果同步与同餐次再次消费确认」
 - **SPEC-003**（#22）「固定链接自助消费与扫码待确认切换」，见
   [自助消费覆盖对照](#spec-003-自助消费覆盖对照issue-22)。
+- **SPEC-004**（#28）「管理员初始化、双因素与消费模式配置」，见
+  [SPEC-004 覆盖对照](#spec-004-覆盖对照issue-28)。
 
 ## 运行
 
@@ -134,6 +136,52 @@ SQLite 库，并起两个 `httptest` 服务端。
 - 计数规则与扫码再次消费判定共用同一实现（`consumptionCount`），因此三个入口
   互相可见。
 
+## SPEC-004 覆盖对照（issue #28）
+
+管理员认证、初始化与消费模式三块，交付于六个子任务（#29–#34）。用户故事
+（issue #28）→ 用例：
+
+| 故事 | 用例 |
+| --- | --- |
+| 1、2 无管理员时打开初始化页并填账号密码 | `TestInitializationOfferedOnlyWithoutAdministrators` |
+| 3 初始化时明确选择三种消费模式之一 | `TestInitializationRequiresAtLeastOneEntrance` |
+| 4 创建成功后直接进入后台并提示配置餐次 | `TestInitializationCreatesAdministratorModesAndSession` |
+| 5 并发提交只创建一个管理员 | `TestConcurrentInitializationCreatesExactlyOneAdministrator` |
+| 6 已有管理员时不再开放首位初始化 | `TestInitializationOfferedOnlyWithoutAdministrators`、`TestRepeatedSubmissionDoesNotCreateASecondAccount` |
+| 7 升级后两种模式都启用 | `TestUpgradeKeepsExistingBindingAndEnablesBothEntrances`、`TestModesDefaultToBothEntrancesOnMigration` |
+| 8、9、10 可只开一种或同时开两种 | `TestModesSupportEveryCombinationExceptAllDisabled` |
+| 11 保存后立即生效 | `TestDisabledPaymentCodeRefusesNewConsumption`、`TestDisabledSelfServiceRefusesPreviewAndConfirmation` |
+| 12 关闭后未完成的确认不能扣款 | `TestWaitingConfirmationCannotChargeAfterPaymentCodeIsDisabled`、`TestModeDisableRacingAConfirmationNeverChargesSilently`、`TestModeDisableRacingASelfServiceConfirmationNeverChargesSilently` |
+| 13 重新开启后须重新发起 | `TestReEnabledEntranceRequiresAFreshFlow` |
+| 14 切换模式不影响已完成消费的查询 | `TestDisabledEntranceLeavesCompletedConsumptionsQueryable`、`TestDisabledEntranceLeavesTheOtherOneWorking` |
+| 15 所有管理员都能改模式 | `TestEveryAdministratorHasEqualAuthority` |
+| 16 未绑定管理员只用密码登录 | `TestUnboundAdministratorLogsInWithPasswordAlone`、`TestUnboundAdministratorCannotLoginWithWrongPassword` |
+| 17、18、19 绑定流程展示二维码并以有效验证码启用 | `TestCLIEnrollmentBindsAnExistingAdministrator`、`TestEnrollmentRequiresValidCodeBeforeActivating` |
+| 20 未完成的绑定不改变登录方式 | `TestAbandonedEnrollmentLeavesLoginUnchanged`、`TestExpiredEnrollmentCannotBeCompleted`、`TestUnrelatedCodeDoesNotActivateAnUnboundAccount` |
+| 21 已绑定者每次登录验证密码与验证码 | `TestBoundAdministratorMustSupplyValidCode` |
+| 22 解绑要求密码与当前验证码 | `TestUnbindRequiresPasswordAndCurrentCode`、`TestUnbindIsRefusedWhenNothingIsBound` |
+| 23 更换先验证旧凭据再验证新认证器 | `TestReplacingTheFactorRequiresTheOldOne`、`TestReplacementConsumesTheCodeItWasAuthorisedWith` |
+| 24 变更后所有旧会话失效 | `TestCLIEnrollmentBindsAnExistingAdministrator`、`TestReplacingTheFactorRequiresTheOldOne`、`TestRecoveryCommandClearsBindingAndRevokesSessions` |
+| 25 恢复命令清除绑定并撤销会话 | `TestRecoveryCommandClearsBindingAndRevokesSessions`、`TestRecoveryCommandFailsForUnknownAdministrator`、`TestAdministratorCanRebindAfterRecovery` |
+| 26 新管理员用初始密码登录且默认未绑定 | `TestAdministratorCanCreateAColleagueWhoThenSignsIn`、`TestCreatedAdministratorStartsUnboundAndBindsItself` |
+| 27 后台创建后续管理员 | `TestAdministratorCanCreateAColleagueWhoThenSignsIn` |
+| 28 建号操作留审计 | `TestNewAdministratorIsAuditedWithoutSecrets` |
+| 29 恢复操作留审计 | `TestRecoveryCommandClearsBindingAndRevokesSessions` |
+| 30 已有绑定升级后保留 | `TestUpgradeKeepsExistingBindingAndEnablesBothEntrances` |
+| 31 旧未绑定账号升级后可用密码登录 | `TestUpgradeLetsANeverBoundAdministratorSignInWithThePassword`、`TestUnboundAdministratorLogsInWithPasswordAlone` |
+| 32 后台展示当前模式与绑定状态 | `TestInitializationCreatesAdministratorModesAndSession`、`TestSecurityResponsesExposeNoSecretMaterial`（`/api/admin/me` 与 `/api/admin/security`） |
+
+SPEC-004 额外固定的事实：
+
+- 初始化只收集账号、密码与消费模式；账号、模式、审计与首个会话在**同一事务**内提交，
+  因此不存在只建了账号却没落模式、或建了账号却登不进去的中间态。
+- 模式有三行表 `consumption_modes`（`id=1`），`CHECK` 保证两种入口不会同时关闭；
+  关闭模式与结束在途请求在同一事务内完成。
+- 待绑定密钥（`totp_pending_secret`）不是登录因素；恢复命令不要求旧 TOTP，只清除
+  指定账号的已绑定与待绑定密钥并撤销其会话，不影响其他账号。
+- 密码、TOTP 密钥与绑定 URI 不出现在 API 响应与审计中；`/api/admin/security*`
+  一律 `Cache-Control: no-store`。
+
 ## 未被本套件覆盖
 
 只通过 HTTP，无法替代浏览器的作用：
@@ -148,9 +196,15 @@ SQLite 库，并起两个 `httptest` 服务端。
   `App.tsx` 抽出以复用，`web/src/main.tsx` 注册 `/self-service` 路径）。仓库当前
   没有 vitest/playwright 依赖，故未加入端到端浏览器用例。
 - 充值冲正、余额退还、日结与管理员复核流程超出 #21 范围，未覆盖。
+- SPEC-004 的**前端交互**同样只能人工验证：初始化页在没有管理员时出现、二维码可被
+  认证器扫描、绑定/解绑/更换的确认流程、以及员工入口按模式显隐。相关实现见
+  `web/src/Admin.tsx`、`web/src/modes.ts`、`web/src/App.tsx`；仓库当前没有
+  vitest/playwright 依赖，故未加入端到端浏览器用例。
 - 并发用例的深度有限：服务以单写连接运行（`store.Open` 的 `SetMaxOpenConns(1)`），
   `database/sql` 会把请求串行化，因此这些用例验证的是 HTTP 层交错，而不是真正并行的
   事务竞争。
+- 迁移后的**升级路径**只覆盖 SPEC-004 引入的两支迁移：用例把库回退到 SPEC-004 之前
+  的表结构后重新迁移，验证既有绑定保留且两种模式开启。更早版本的逐级升级不在范围内。
 
 ## 实现行为观察（非缺陷）
 
