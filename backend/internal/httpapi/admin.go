@@ -66,7 +66,13 @@ func adminRoutes(public *http.ServeMux, db *sql.DB, admins *adminauth.Service, e
 			return
 		}
 		principal := principalFromContext(r.Context())
-		writeJSON(w, http.StatusOK, map[string]any{"id": principal.ID, "username": principal.Username})
+		state, err := admins.Security(r.Context(), principal.ID)
+		if err != nil {
+			WriteError(w, http.StatusServiceUnavailable, CodeServiceUnavailable, "service is not ready")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"id": principal.ID, "username": principal.Username,
+			"second_factor_bound": state.SecondFactorBound, "enrollment_pending": state.EnrollmentPending})
 	})
 	admin.HandleFunc("/api/admin/logout", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -85,6 +91,7 @@ func adminRoutes(public *http.ServeMux, db *sql.DB, admins *adminauth.Service, e
 		w.WriteHeader(http.StatusNoContent)
 	})
 	adminEmployeeRoutes(admin, employeeService)
+	adminSecurityRoutes(admin, admins)
 	adminMealRoutes(admin, mealService)
 	adminRechargeRoutes(admin, rechargeService)
 	adminAccountRoutes(admin, accountService)

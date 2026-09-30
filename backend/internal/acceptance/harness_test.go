@@ -54,11 +54,14 @@ const (
 type env struct {
 	t              *testing.T
 	db             *sql.DB
+	dbPath         string
 	location       *time.Location
 	public         *httptest.Server
 	internal       *httptest.Server
 	internalHandle http.Handler
+	admins         *adminauth.Service
 	adminToken     string
+	lastAdminToken string
 }
 
 type employee struct {
@@ -79,49 +82,139 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	adminService := adminauth.New(db, adminauth.NewTOTP(db))
-	employeeService := employees.New(db)
-	mealService := meals.New(db, location)
-	terminalService := terminal.New(db, mealService, location)
-	tokenService := paymenttokens.New(db)
-	rechargeService := recharges.New(db)
-	backupService := &backups.Service{DB: db, DatabasePath: dbPath}
 	e := &env{
-		t:              t,
-		db:             db,
-		location:       location,
-		public:         httptest.NewServer(httpapi.Public(db, adminService, employeeService, mealService, tokenService, terminalService, rechargeService, backupService)),
-		internalHandle: httpapi.Internal(db, terminalService),
+		t:        t,
+		db:       db,
+		dbPath:   dbPath,
+		location: location,
+		admins:   adminauth.New(db, adminauth.NewTOTP(db)),
 	}
-	e.internal = httptest.NewServer(e.internalHandle)
+	e.startServers()
 	t.Cleanup(func() {
 		e.public.Close()
 		e.internal.Close()
 		db.Close()
 	})
-	if _, err := adminService.CreateAdmin(t.Context(), adminUsername, adminPassword); err != nil {
+	if _, err := e.admins.CreateAdmin(t.Context(), adminUsername, adminPassword); err != nil {
 		t.Fatalf("create administrator: %v", err)
 	}
-	uri, err := adminauth.EnrollTOTP(t.Context(), db, adminUsername)
-	if err != nil {
-		t.Fatalf("enroll administrator second factor: %v", err)
-	}
-	secret, err := totpSecret(uri)
-	if err != nil {
-		t.Fatalf("read second factor secret: %v", err)
-	}
+	// The second factor is optional since SPEC-004, so the fixture administrator
+	// signs in with the password alone. Tests that need a binding enroll one
+	// through the admin API or the CLI command.
+	e.adminToken = e.loginAdmin(adminUsername, adminPassword, "")
+	return e
+}
+
+// startServers builds the production services on top of the environment's
+// database and starts both listeners.
+func (e *env) startServers() {
+	e.t.Helper()
+	db, location := e.db, e.location
+	employeeService := employees.New(db)
+	mealService := meals.New(db, location)
+	terminalService := terminal.New(db, mealService, location)
+	tokenService := paymenttokens.New(db)
+	rechargeService := recharges.New(db)
+	backupService := &backups.Service{DB: db, DatabasePath: e.dbPath}
+	e.public = httptest.NewServer(httpapi.Public(db, e.admins, employeeService, mealService,
+		tokenService, terminalService, rechargeService, backupService))
+	e.internalHandle = httpapi.Internal(db, terminalService)
+	e.internal = httptest.NewServer(e.internalHandle)
+}
+
+// loginAdmin signs one administrator in and returns the bearer token. An empty
+// code stands for the password-only login an unbound administrator uses.
+func (e *env) loginAdmin(username, password, code string) string {
+	e.t.Helper()
 	var session struct {
 		AccessToken string `json:"access_token"`
 	}
-	e.post(e.public.URL, "/api/admin/login", "", map[string]string{
-		"username": adminUsername, "password": adminPassword,
-		"second_factor_code": totpCode(secret, time.Now()),
-	}).expect(t, http.StatusOK, &session)
-	if session.AccessToken == "" {
-		t.Fatal("administrator session is empty")
+	payload := map[string]string{"username": username, "password": password}
+	if code != "" {
+		payload["second_factor_code"] = code
 	}
-	e.adminToken = session.AccessToken
-	return e
+	e.post(e.public.URL, "/api/admin/login", "", payload).expect(e.t, http.StatusOK, &session)
+	if session.AccessToken == "" {
+		e.t.Fatal("administrator session is empty")
+	}
+	e.lastAdminToken = session.AccessToken
+	return session.AccessToken
+}
+
+// loginAdminRaw signs in without requiring success, so a test can assert the
+// rejection of a bad password or a missing code.
+func (e *env) loginAdminRaw(username, password, code string) apiResponse {
+	e.t.Helper()
+	payload := map[string]string{"username": username, "password": password}
+	if code != "" {
+		payload["second_factor_code"] = code
+	}
+	return e.post(e.public.URL, "/api/admin/login", "", payload)
+}
+
+// enrollAdminCLI binds a second factor through the server command used for a
+// first enrollment and returns the shared secret an authenticator would hold.
+func (e *env) enrollAdminCLI(username string) []byte {
+	e.t.Helper()
+	uri, err := adminauth.EnrollTOTP(e.t.Context(), e.db, username)
+	if err != nil {
+		e.t.Fatalf("enroll administrator second factor: %v", err)
+	}
+	secret, err := totpSecret(uri)
+	if err != nil {
+		e.t.Fatalf("read second factor secret: %v", err)
+	}
+	return secret
+}
+
+type auditItem struct {
+	ID      int64  `json:"id"`
+	ActorID int64  `json:"administrator_id"`
+	Action  string `json:"action"`
+	Details string `json:"details_json"`
+}
+
+// auditEvents lists the audit records the admin API exposes.
+func (e *env) auditEvents(token string) []auditItem {
+	e.t.Helper()
+	if token == "" {
+		token = e.lastAdminToken
+	}
+	var page struct {
+		Items []auditItem `json:"items"`
+	}
+	e.get(e.public.URL, "/api/admin/audit-events", token).expect(e.t, http.StatusOK, &page)
+	return page.Items
+}
+
+// hasAuditAction reports whether an audit action was recorded at least once,
+// read with the given administrator session.
+func (e *env) hasAuditAction(token, action string) bool {
+	e.t.Helper()
+	if token == "" {
+		token = e.lastAdminToken
+	}
+	for _, item := range e.auditEvents(token) {
+		if item.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
+// countAuditAction reports how many times an audit action was recorded.
+func (e *env) countAuditAction(token, action string) int {
+	e.t.Helper()
+	if token == "" {
+		token = e.lastAdminToken
+	}
+	count := 0
+	for _, item := range e.auditEvents(token) {
+		if item.Action == action {
+			count++
+		}
+	}
+	return count
 }
 
 func totpSecret(uri string) ([]byte, error) {
@@ -148,9 +241,12 @@ func totpCode(secret []byte, at time.Time) string {
 // apiResponse carries one HTTP exchange so call sites can assert on it in a
 // single expression.
 type apiResponse struct {
-	status int
-	body   []byte
+	status  int
+	body    []byte
+	headers http.Header
 }
+
+func (r apiResponse) header(name string) string { return r.headers.Get(name) }
 
 func (r apiResponse) expect(t *testing.T, want int, value any) apiResponse {
 	t.Helper()
@@ -194,7 +290,7 @@ func (e *env) request(method, base, path, token string, payload any) apiResponse
 	if err != nil {
 		e.t.Fatalf("read response body: %v", err)
 	}
-	return apiResponse{status: response.StatusCode, body: data}
+	return apiResponse{status: response.StatusCode, body: data, headers: response.Header.Clone()}
 }
 
 func (e *env) get(base, path, token string) apiResponse {

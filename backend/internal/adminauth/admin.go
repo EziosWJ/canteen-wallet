@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base32"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -19,18 +20,26 @@ import (
 )
 
 var (
-	ErrInvalidUsername    = errors.New("username must be 3 to 64 letters, digits, dots, underscores or hyphens")
-	ErrInvalidCredentials = errors.New("invalid credentials")
-	ErrUnauthenticated    = errors.New("unauthenticated")
-	usernamePattern       = regexp.MustCompile(`^[a-z0-9._-]{3,64}$`)
+	ErrInvalidUsername     = errors.New("username must be 3 to 64 letters, digits, dots, underscores or hyphens")
+	ErrInvalidCredentials  = errors.New("invalid credentials")
+	ErrUnauthenticated     = errors.New("unauthenticated")
+	ErrSecondFactorPending = errors.New("no pending second factor enrollment")
+	ErrSecondFactorExpired = errors.New("pending second factor enrollment has expired")
+	usernamePattern        = regexp.MustCompile(`^[a-z0-9._-]{3,64}$`)
 )
 
 const sessionDuration = 12 * time.Hour
 const failedLoginDelay = 500 * time.Millisecond
 
-// SecondFactor is the extension point for mandatory administrator MFA before
-// the live pilot. When configured, a password alone cannot issue a session.
+// enrollmentWindow bounds how long a generated but unverified authenticator
+// secret stays usable, so an abandoned enrollment cannot be completed later.
+const enrollmentWindow = 10 * time.Minute
+
+// SecondFactor is the optional administrator second factor. Required reports
+// whether this administrator must supply a proof in addition to the password;
+// an unbound administrator logs in with the password alone.
 type SecondFactor interface {
+	Required(ctx context.Context, administratorID int64) (bool, error)
 	Verify(ctx context.Context, administratorID int64, proof string) error
 }
 
@@ -50,6 +59,24 @@ type Session struct {
 	Token         string
 	ExpiresAt     time.Time
 	Administrator Principal
+}
+
+// SecurityState is the authenticator binding status shown in the admin UI. It
+// deliberately carries no secret material.
+type SecurityState struct {
+	SecondFactorBound   bool       `json:"second_factor_bound"`
+	EnrollmentPending   bool       `json:"enrollment_pending"`
+	EnrollmentExpiresAt *time.Time `json:"enrollment_expires_at,omitempty"`
+}
+
+// Enrollment is the response to starting a binding: the URI an authenticator
+// scans plus the same secret in base32 for manual entry. It must never be cached
+// and must not be written to logs.
+type Enrollment struct {
+	OTPAuthURI  string    `json:"otpauth_uri"`
+	Secret      string    `json:"secret"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	Replacement bool      `json:"replacement"`
 }
 
 func New(db *sql.DB, factor SecondFactor) *Service {
@@ -109,6 +136,12 @@ func (s *Service) Login(ctx context.Context, username, password, secondFactorPro
 	case <-ctx.Done():
 		return Session{}, ctx.Err()
 	}
+	return s.loginLocked(ctx, username, password, secondFactorProof)
+}
+
+// loginLocked runs after the login concurrency gate is held. Callers that
+// already hold the gate (initialization) use it to avoid nesting the gate.
+func (s *Service) loginLocked(ctx context.Context, username, password, secondFactorProof string) (Session, error) {
 	var id int64
 	var hash, status string
 	err := s.db.QueryRowContext(ctx, `SELECT id, password_hash, status FROM administrators WHERE username = ?`, username).Scan(&id, &hash, &status)
@@ -122,12 +155,18 @@ func (s *Service) Login(ctx context.Context, username, password, secondFactorPro
 	if !VerifyPassword(password, hash) || status != "active" {
 		return Session{}, s.failLoginWithDelay(ctx, id, "invalid_credentials")
 	}
-	if s.factor == nil && secondFactorProof != "" {
-		return Session{}, s.failLoginWithDelay(ctx, id, "second_factor_unavailable")
-	}
+	// A bound administrator must supply a valid code; an unbound one logs in
+	// with the password alone. A supplied code for an unbound account is not a
+	// login factor and is ignored.
 	if s.factor != nil {
-		if err := s.factor.Verify(ctx, id, secondFactorProof); err != nil {
-			return Session{}, s.failLoginWithDelay(ctx, id, "second_factor_failed")
+		required, err := s.factor.Required(ctx, id)
+		if err != nil {
+			return Session{}, err
+		}
+		if required {
+			if err := s.factor.Verify(ctx, id, secondFactorProof); err != nil {
+				return Session{}, s.failLoginWithDelay(ctx, id, "second_factor_failed")
+			}
 		}
 	}
 	tokenBytes := make([]byte, 32)
@@ -166,6 +205,151 @@ func (s *Service) Login(ctx context.Context, username, password, secondFactorPro
 		return Session{}, err
 	}
 	return Session{Token: token, ExpiresAt: expiresAt, Administrator: Principal{ID: id, Username: username, tokenHash: tokenHash}}, nil
+}
+
+// Security reports the authenticator binding state of one administrator.
+func (s *Service) Security(ctx context.Context, administratorID int64) (SecurityState, error) {
+	var bound int
+	var pendingAt sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT CASE WHEN totp_secret IS NULL THEN 0 ELSE 1 END, totp_pending_created_at
+		FROM administrators WHERE id=? AND status='active'`, administratorID).Scan(&bound, &pendingAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SecurityState{}, ErrUnauthenticated
+	}
+	if err != nil {
+		return SecurityState{}, err
+	}
+	state := SecurityState{SecondFactorBound: bound == 1}
+	if pendingAt.Valid {
+		if created, err := time.Parse(time.RFC3339Nano, pendingAt.String); err == nil {
+			expires := created.Add(enrollmentWindow)
+			if expires.After(time.Now().UTC()) {
+				state.EnrollmentPending = true
+				state.EnrollmentExpiresAt = &expires
+			}
+		}
+	}
+	return state, nil
+}
+
+// StartEnrollment creates a pending authenticator secret and returns the URI an
+// authenticator can scan. The pending secret is not a login factor: only a
+// successful confirmation activates it. Binding an unbound administrator needs
+// no extra credentials beyond the session; replacing an existing binding
+// requires the current password and a valid current TOTP code.
+func (s *Service) StartEnrollment(ctx context.Context, principal Principal, password, currentCode string) (Enrollment, error) {
+	if principal.ID < 1 || len(password) > 1024 || len(currentCode) > 128 {
+		return Enrollment{}, ErrInvalidCredentials
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Enrollment{}, err
+	}
+	defer tx.Rollback()
+	var username, hash string
+	var bound int
+	var lastStep int64
+	err = tx.QueryRowContext(ctx, `SELECT username,password_hash,
+		CASE WHEN totp_secret IS NULL THEN 0 ELSE 1 END, totp_last_step
+		FROM administrators WHERE id=? AND status='active'`, principal.ID).Scan(&username, &hash, &bound, &lastStep)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Enrollment{}, ErrUnauthenticated
+	}
+	if err != nil {
+		return Enrollment{}, err
+	}
+	if bound == 1 {
+		if !VerifyPassword(password, hash) {
+			return Enrollment{}, ErrInvalidCredentials
+		}
+		var secret []byte
+		if err := tx.QueryRowContext(ctx, `SELECT totp_secret FROM administrators WHERE id=?`, principal.ID).Scan(&secret); err != nil {
+			return Enrollment{}, err
+		}
+		if _, ok := matchTOTP(secret, currentCode, lastStep, time.Now().UTC()); !ok {
+			return Enrollment{}, ErrInvalidCredentials
+		}
+	}
+	secret, err := newTOTPSecret()
+	if err != nil {
+		return Enrollment{}, err
+	}
+	now := time.Now().UTC()
+	stamp := now.Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `UPDATE administrators SET totp_pending_secret=?,totp_pending_created_at=?,updated_at=?
+		WHERE id=?`, secret, stamp, stamp, principal.ID); err != nil {
+		return Enrollment{}, err
+	}
+	if err := store.RecordAudit(ctx, tx, principal.ID, "ADMIN_TOTP_ENROLLMENT_STARTED", "administrator",
+		strconv.FormatInt(principal.ID, 10), map[string]any{"replacement": bound == 1}); err != nil {
+		return Enrollment{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Enrollment{}, err
+	}
+	return Enrollment{OTPAuthURI: enrolOTPURI(username, secret),
+		Secret:      base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(secret),
+		ExpiresAt:   now.Add(enrollmentWindow),
+		Replacement: bound == 1}, nil
+}
+
+// ConfirmEnrollment activates a pending binding. Only a valid code from the
+// pending secret turns it on; a wrong, abandoned or expired enrollment leaves
+// the administrator's login behaviour unchanged. Success revokes every existing
+// session, including the one that started the enrollment.
+func (s *Service) ConfirmEnrollment(ctx context.Context, principal Principal, code string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var pending []byte
+	var pendingAt sql.NullString
+	var bound int
+	err = tx.QueryRowContext(ctx, `SELECT totp_pending_secret,totp_pending_created_at,
+		CASE WHEN totp_secret IS NULL THEN 0 ELSE 1 END FROM administrators WHERE id=? AND status='active'`,
+		principal.ID).Scan(&pending, &pendingAt, &bound)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrUnauthenticated
+	}
+	if err != nil {
+		return false, err
+	}
+	if len(pending) != 20 || !pendingAt.Valid {
+		return false, ErrSecondFactorPending
+	}
+	created, err := time.Parse(time.RFC3339Nano, pendingAt.String)
+	if err != nil {
+		return false, ErrSecondFactorPending
+	}
+	now := time.Now().UTC()
+	if !now.Before(created.Add(enrollmentWindow)) {
+		return false, ErrSecondFactorExpired
+	}
+	matched, ok := matchTOTP(pending, code, -1, now)
+	if !ok {
+		return false, ErrInvalidCredentials
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE administrators SET totp_secret=?,totp_last_step=?,
+		totp_pending_secret=NULL,totp_pending_created_at=NULL,updated_at=? WHERE id=?`,
+		pending, matched, now.Format(time.RFC3339Nano), principal.ID); err != nil {
+		return false, err
+	}
+	if _, err := revokeSessionsTx(ctx, tx, principal.ID, now); err != nil {
+		return false, err
+	}
+	action := "ADMIN_TOTP_BOUND"
+	if bound == 1 {
+		action = "ADMIN_TOTP_CHANGED"
+	}
+	if err := store.RecordAudit(ctx, tx, principal.ID, action, "administrator",
+		strconv.FormatInt(principal.ID, 10), map[string]any{"replacement": bound == 1}); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return bound == 1, nil
 }
 
 func (s *Service) failLoginWithDelay(ctx context.Context, id int64, reason string) error {

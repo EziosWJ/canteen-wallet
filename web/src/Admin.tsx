@@ -34,12 +34,12 @@ function Login({ onLogin }: { onLogin: (session: AdminSession) => void }) {
   }
   return <main className="admin-login-wrap"><section className="admin-login-card">
     <div className="admin-brand"><img src="/assets/ui/app-logo.png" alt="食堂储值卡"/><span><b>食堂储值卡</b><small>管理后台</small></span></div>
-    <h1>管理员登录</h1><p className="admin-muted">使用独立管理员账号和第二因素验证码</p>
+    <h1>管理员登录</h1><p className="admin-muted">使用独立管理员账号；已绑定动态验证码的账号需要一并输入</p>
     <form onSubmit={submit} className="admin-form">
       {error && <div className="admin-alert error" role="alert">{error}</div>}
       <label>管理员账号<input autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} required/></label>
       <label>密码<input type="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} required/></label>
-      <label>动态验证码<input inputMode="numeric" autoComplete="one-time-code" value={secondFactor} onChange={e => setSecondFactor(e.target.value)} required/></label>
+      <label>动态验证码<input inputMode="numeric" autoComplete="one-time-code" value={secondFactor} onChange={e => setSecondFactor(e.target.value)} placeholder="未绑定可留空"/><small className="admin-muted">绑定是可选的：未绑定时只输入密码即可登录。</small></label>
       <button className="admin-primary" disabled={busy}>{busy ? '正在验证…' : '安全登录'}</button>
     </form>
   </section></main>;

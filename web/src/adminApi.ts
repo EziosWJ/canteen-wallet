@@ -28,6 +28,23 @@ export type AdminMeal = {
   enabled: boolean;
 };
 
+/** Binding state of the signed-in administrator's authenticator. Binding is
+ * optional: an unbound administrator signs in with the password alone. */
+export type SecurityState = {
+  second_factor_bound: boolean;
+  enrollment_pending: boolean;
+  enrollment_expires_at?: string | null;
+};
+
+/** A pending binding. The secret and URI are returned once, at the moment the
+ * administrator asks for them, and are never readable again. */
+export type SecondFactorEnrollment = {
+  otpauth_uri: string;
+  secret: string;
+  expires_at: string;
+  replacement: boolean;
+};
+
 export class AdminApiError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
 }
@@ -85,7 +102,9 @@ export const adminApi = {
   login(username: string, password: string, secondFactorCode: string) {
     return request<AdminSession>('/api/admin/login', null, { method: 'POST', body: JSON.stringify({ username, password, second_factor_code: secondFactorCode }) });
   },
-  me(session: AdminSession) { return request<{ id: number; username: string }>('/api/admin/me', session); },
+  me(session: AdminSession) {
+    return request<{ id: number; username: string; second_factor_bound: boolean; enrollment_pending: boolean }>('/api/admin/me', session);
+  },
   logout(session: AdminSession) { return request<void>('/api/admin/logout', session, { method: 'POST' }); },
   employees(session: AdminSession) { return request<{ employees: AdminEmployee[] }>('/api/admin/employees', session); },
   createEmployee(session: AdminSession, input: Pick<AdminEmployee, 'employee_no' | 'name' | 'phone' | 'department'>) {
@@ -114,5 +133,24 @@ export const adminApi = {
   adjust(session: AdminSession, accountId: number, amountCents: number, reason: string, idempotencyKey: string) {
     return request<unknown>(`/api/admin/accounts/${accountId}/adjust`, session, { method: 'POST', body: JSON.stringify({ amount_cents: amountCents, reason, idempotency_key: idempotencyKey }) });
   },
+  security(session: AdminSession) { return request<SecurityState>('/api/admin/security', session); },
+  /** Starts a binding. Replacing an existing one needs the password and a
+   * current code of the authenticator being replaced. */
+  startEnrollment(session: AdminSession, password: string, currentCode: string) {
+    return request<SecondFactorEnrollment>('/api/admin/security/enrollment', session, {
+      method: 'POST', body: JSON.stringify({ password, second_factor_code: currentCode }),
+    });
+  },
+  confirmEnrollment(session: AdminSession, code: string) {
+    return request<{ second_factor_bound: boolean; replaced: boolean; sessions_revoked: boolean }>(
+      '/api/admin/security/enrollment/confirm', session,
+      { method: 'POST', body: JSON.stringify({ second_factor_code: code }) });
+  },
+  removeSecondFactor(session: AdminSession, password: string, currentCode: string) {
+    return request<{ second_factor_bound: boolean; sessions_revoked: boolean }>(
+      '/api/admin/security/second-factor', session,
+      { method: 'DELETE', body: JSON.stringify({ password, second_factor_code: currentCode }) });
+  },
+
   generic<T>(session: AdminSession, path: string, options: RequestInit = {}) { return request<T>(path, session, options); },
 };
