@@ -8,6 +8,7 @@ import (
 	"github.com/EziosWJ/canteen-wallet/backend/internal/accounts"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/adminauth"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/backups"
+	"github.com/EziosWJ/canteen-wallet/backend/internal/bootstrap"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/employees"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/ledger"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/meals"
@@ -38,6 +39,7 @@ const (
 	CodeAlreadyReversed        Code = "ALREADY_REVERSED"
 	CodeInsufficientFunds      Code = "INSUFFICIENT_FUNDS"
 	CodePayoutConflict         Code = "PAYOUT_CONFLICT"
+	CodeAlreadyInitialized     Code = "ALREADY_INITIALIZED"
 	CodeEntranceDisabled       Code = "ENTRANCE_DISABLED"
 )
 
@@ -53,6 +55,7 @@ func Public(db *sql.DB, admins *adminauth.Service, employeeService *employees.Se
 	healthRoutes(mux, db)
 	adminRoutes(mux, db, admins, employeeService, mealService, rechargeService, accounts.New(db), backupService, settingsService)
 	publicSettingsRoutes(mux, settingsService)
+	publicBootstrapRoutes(mux, bootstrap.New(db, settingsService))
 	employeeRoutes(mux, employeeService, tokenService, terminalService, ledger.New(db), mealService)
 	mux.HandleFunc("/api", notFound)
 	mux.HandleFunc("/api/", notFound)

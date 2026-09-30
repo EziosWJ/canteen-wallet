@@ -17,6 +17,8 @@ function securityMessage(error: unknown): string {
     case 'INVALID_CREDENTIALS': return '密码或当前动态验证码不正确。';
     case 'INVALID_STATE': return error.message;
     case 'CONFLICT': return error.message;
+    case 'ALREADY_INITIALIZED': return '系统已经有管理员，无法再次初始化。';
+    case 'ENTRANCE_DISABLED': return '该消费入口已关闭。';
     default: return message(error);
   }
 }
@@ -89,6 +91,48 @@ function ConsumptionModeForm({ modes, busy, onSubmit }: { modes: ConsumptionMode
   </form>;
 }
 
+/** The one-time initialization entry. It is only reachable while the
+ * installation has no administrator at all, which the status endpoint reports. */
+export function Initialization({ onReady }: { onReady: (session: AdminSession, nextStep: string) => void }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  // Nothing is pre-selected: the initializer must state which entrances this
+  // canteen offers rather than accept a guess.
+  const [modes, setModes] = useState<ConsumptionModes>({ payment_code: false, self_service: false });
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setError('');
+    if (password.length < 12) { setError('密码至少需要 12 个字符。'); return; }
+    if (password !== confirm) { setError('两次输入的密码不一致。'); return; }
+    if (!modes.payment_code && !modes.self_service) { setError('请选择至少一种消费模式。'); return; }
+    setBusy(true);
+    try {
+      const session = await adminApi.initialize({ username: username.trim(), password, ...modes });
+      saveAdminSession(session);
+      onReady(session, session.next_step);
+    } catch (reason) { setError(securityMessage(reason)); }
+    finally { setBusy(false); }
+  }
+
+  return <main className="admin-login-wrap"><section className="admin-login-card">
+    <div className="admin-brand"><img src="/assets/ui/app-logo.png" alt="食堂储值卡"/><span><b>食堂储值卡</b><small>管理后台</small></span></div>
+    <h1>初始化系统</h1><p className="admin-muted">系统还没有管理员。请创建首位管理员并选择食堂提供的消费模式，随后继续配置餐次。</p>
+    <form onSubmit={submit} className="admin-form">
+      {error && <div className="admin-alert error" role="alert">{error}</div>}
+      <label>管理员账号<input autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} required minLength={3} maxLength={64} pattern="[a-z0-9._\-]+"/><small className="admin-muted">3–64 位小写字母、数字、点、下划线或短横线。</small></label>
+      <label>登录密码<input type="password" autoComplete="new-password" value={password} onChange={e => setPassword(e.target.value)} required minLength={12}/><small className="admin-muted">至少 12 个字符。</small></label>
+      <label>确认密码<input type="password" autoComplete="new-password" value={confirm} onChange={e => setConfirm(e.target.value)} required/></label>
+      <ModeChoice modes={modes} onChange={setModes} legend="员工可用的消费模式"/>
+      <button className="admin-primary" disabled={busy}>{busy ? '正在初始化…' : '创建首位管理员并继续'}</button>
+    </form>
+    <p className="admin-muted">初始化成功后会立即登录，并提示你继续配置餐次时间与价格。</p>
+  </section></main>;
+}
+
 function Panel({ title, description, children, action }: { title: string; description?: string; children: ReactNode; action?: ReactNode }) {
   return <section className="admin-panel"><header className="admin-panel-head"><div><h2>{title}</h2>{description && <p>{description}</p>}</div>{action}</header>{children}</section>;
 }
@@ -124,7 +168,31 @@ function rowsFrom(value: unknown): Record<string, unknown>[] {
 }
 
 export default function Admin() {
+  // The session lives here because initialization and login both produce one.
   const [session, setSession] = useState<AdminSession | null>(() => readAdminSession());
+  // Whether the one-time initialization entry is open is decided by the server,
+  // so the first paint waits for it rather than guessing from a missing session.
+  const [bootstrap, setBootstrap] = useState<'checking' | 'required' | 'ready'>('checking');
+  const [nextStep, setNextStep] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    void adminApi.bootstrapStatus()
+      .then(status => { if (!cancelled) setBootstrap(status.required ? 'required' : 'ready'); })
+      .catch(() => { if (!cancelled) setBootstrap('ready'); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (bootstrap === 'checking') return <main className="admin-login-wrap"><section className="admin-login-card"><Loading/></section></main>;
+  if (bootstrap === 'required') return <Initialization onReady={(next, step) => { setBootstrap('ready'); setNextStep(step); setSession(next); }}/>;
+
+  return <AdminConsole session={session} onSession={setSession} initialState={nextStep} onInitialStateConsumed={() => setNextStep('')}/>;
+}
+
+function AdminConsole({ session, onSession, initialState, onInitialStateConsumed }: {
+  session: AdminSession | null; onSession: (session: AdminSession | null) => void;
+  initialState: string; onInitialStateConsumed: () => void;
+}) {
   const [section, setSection] = useState<Section>('employees');
   const [identity, setIdentity] = useState('');
   const [state, setState] = useState<LoadState>(emptyLoad);
@@ -142,7 +210,7 @@ export default function Admin() {
   const [businessDate, setBusinessDate] = useState(new Date().toLocaleDateString('en-CA'));
   const [transactionFilters, setTransactionFilters] = useState({ type: '', employee_id: '', from: '', to: '' });
 
-  const expire = useCallback(() => { saveAdminSession(null); setSession(null); setIdentity(''); setState(emptyLoad); }, []);
+  const expire = useCallback(() => { saveAdminSession(null); onSession(null); setIdentity(''); setState(emptyLoad); }, [onSession]);
   const load = useCallback(async () => {
     if (!session) return;
     setState({ busy: true, error: '', data: null }); setNotice('');
@@ -187,6 +255,15 @@ export default function Admin() {
   }, [session, expire]);
   useEffect(() => { void load(); }, [load]);
 
+  // Initialization deliberately stops after creating the account so the operator
+  // continues with the meal configuration the page prompts for.
+  useEffect(() => {
+    if (!initialState || !session) return;
+    setSection('meals');
+    setNotice('系统已初始化。请继续配置餐次供应时间与价格。');
+    onInitialStateConsumed();
+  }, [initialState, session, onInitialStateConsumed]);
+
   async function runAction(action: () => Promise<unknown>, success: string) {
     setBusy(true); setNotice('');
     try { await action(); setNotice(success); await load(); }
@@ -195,7 +272,7 @@ export default function Admin() {
   }
   async function logout() { if (session) { try { await adminApi.logout(session); } catch { /* local credentials must still be cleared */ } } expire(); }
 
-  if (!session) return <Login onLogin={next => setSession(next)}/>;
+  if (!session) return <Login onLogin={onSession}/>;
 
   return <div className="admin-app">
     <header className="admin-topbar"><a className="admin-brand" href="/admin" aria-label="食堂储值卡管理后台"><img src="/assets/ui/app-logo.png" alt=""/><span><b>食堂储值卡</b><small>管理后台</small></span></a><div className="admin-user"><span>{identity || session.administrator.username}</span><button type="button" onClick={() => void logout()}>退出</button></div></header>

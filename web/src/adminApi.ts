@@ -52,6 +52,12 @@ export type SecondFactorEnrollment = {
   replacement: boolean;
 };
 
+/** Whether the installation still has no administrator and therefore offers the
+ * one-time initialization entry. */
+export type BootstrapStatus = { required: boolean };
+
+export type BootstrapResult = AdminSession & { next_step: string };
+
 export type AdminAccount = {
   id: number;
   username: string;
@@ -153,6 +159,14 @@ export const adminApi = {
       { method: 'PUT', body: JSON.stringify(modes) });
   },
 
+  // --- SPEC-004: initialization, optional second factor, consumption modes ---
+
+  /** Reads whether the one-time first-administrator entry is still open. */
+  bootstrapStatus() { return request<BootstrapStatus>('/api/bootstrap/status', null); },
+  /** Creates the first administrator. The server refuses once one exists. */
+  initialize(input: { username: string; password: string } & ConsumptionModes) {
+    return request<BootstrapResult>('/api/bootstrap', null, { method: 'POST', body: JSON.stringify(input) });
+  },
   security(session: AdminSession) { return request<SecurityState>('/api/admin/security', session); },
   /** Starts a binding. Replacing an existing one needs the password and a
    * current code of the authenticator being replaced. */

@@ -77,6 +77,21 @@ type employee struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	e := newBareEnv(t)
+	if _, err := e.admins.CreateAdmin(t.Context(), adminUsername, adminPassword); err != nil {
+		t.Fatalf("create administrator: %v", err)
+	}
+	// The second factor is optional since SPEC-004, so the fixture administrator
+	// signs in with the password alone. Tests that need a binding enroll one
+	// through the admin API or the recovery CLI.
+	e.adminToken = e.loginAdmin(adminUsername, adminPassword, "")
+	return e
+}
+
+// newBareEnv starts the real services against a migrated temporary database with
+// no administrator yet, which is the state the initialization entry exists for.
+func newBareEnv(t *testing.T) *env {
+	t.Helper()
 	location, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
 		t.Fatalf("load time zone: %v", err)
@@ -99,18 +114,13 @@ func newEnv(t *testing.T) *env {
 		e.internal.Close()
 		db.Close()
 	})
-	if _, err := e.admins.CreateAdmin(t.Context(), adminUsername, adminPassword); err != nil {
-		t.Fatalf("create administrator: %v", err)
-	}
-	// The second factor is optional since SPEC-004, so the fixture administrator
-	// signs in with the password alone. Tests that need a binding enroll one
-	// through the admin API or the CLI command.
-	e.adminToken = e.loginAdmin(adminUsername, adminPassword, "")
 	return e
 }
 
 // startServers builds the production services on top of the environment's
-// database and starts both listeners.
+// database and starts both listeners. Building them again over the same
+// database is how a test observes a restarted process: only stored state, never
+// in-memory state, survives.
 func (e *env) startServers() {
 	e.t.Helper()
 	db, location := e.db, e.location

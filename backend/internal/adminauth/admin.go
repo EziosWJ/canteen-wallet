@@ -232,8 +232,40 @@ func (s *Service) Login(ctx context.Context, username, password, secondFactorPro
 	return s.loginLocked(ctx, username, password, secondFactorProof)
 }
 
-// loginLocked runs after the login concurrency gate is held. Callers that
-// already hold the gate (initialization) use it to avoid nesting the gate.
+// newSessionToken returns a fresh bearer token and the hash stored for it.
+func newSessionToken() (string, [32]byte, error) {
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", [32]byte{}, err
+	}
+	return base64.RawURLEncoding.EncodeToString(tokenBytes), sha256.Sum256(tokenBytes), nil
+}
+
+// IssueSessionTx mints a session for an administrator the caller has already
+// created or authenticated, inside the caller's transaction, and records the
+// login audit event there. Initialization uses it so the account, the mode
+// configuration, the audit trail and the first session either all exist or none
+// do; a session failure can never leave an account nobody can sign in to.
+func IssueSessionTx(ctx context.Context, tx *sql.Tx, adminID int64, username string) (Session, error) {
+	token, tokenHash, err := newSessionToken()
+	if err != nil {
+		return Session{}, err
+	}
+	now := time.Now().UTC()
+	expiresAt := now.Add(sessionDuration)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO admin_sessions (token_hash, administrator_id, created_at, expires_at)
+		VALUES (?, ?, ?, ?)`, tokenHash[:], adminID, now.Unix(), expiresAt.Unix()); err != nil {
+		return Session{}, err
+	}
+	if err := store.RecordAudit(ctx, tx, adminID, "ADMIN_LOGIN_SUCCEEDED", "administrator",
+		strconv.FormatInt(adminID, 10), nil); err != nil {
+		return Session{}, err
+	}
+	return Session{Token: token, ExpiresAt: expiresAt,
+		Administrator: Principal{ID: adminID, Username: username, tokenHash: tokenHash}}, nil
+}
+
+// loginLocked runs after the login concurrency gate is held.
 func (s *Service) loginLocked(ctx context.Context, username, password, secondFactorProof string) (Session, error) {
 	var id int64
 	var hash, status string
@@ -262,12 +294,10 @@ func (s *Service) loginLocked(ctx context.Context, username, password, secondFac
 			}
 		}
 	}
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
+	token, tokenHash, err := newSessionToken()
+	if err != nil {
 		return Session{}, err
 	}
-	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	tokenHash := sha256.Sum256(tokenBytes)
 	now := time.Now().UTC()
 	expiresAt := now.Add(sessionDuration)
 	tx, err := s.db.BeginTx(ctx, nil)
