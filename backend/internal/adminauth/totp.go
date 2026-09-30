@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/user"
 	"strconv"
 	"strings"
 	"time"
@@ -160,4 +161,49 @@ func EnrollTOTP(ctx context.Context, db *sql.DB, username string) (string, error
 		return "", err
 	}
 	return enrolOTPURI(username, secret), nil
+}
+
+// RecoverTOTP is the documented lost-authenticator recovery command. It clears
+// both the active and the pending secret, revokes every existing session and
+// records an audit event, so the administrator can sign in with the password
+// alone and bind an authenticator again from the admin UI. It deliberately does
+// not require an old TOTP code, and it never touches another account.
+func RecoverTOTP(ctx context.Context, db *sql.DB, username string) error {
+	username = strings.ToLower(strings.TrimSpace(username))
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var id int64
+	var hadBinding int
+	err = tx.QueryRowContext(ctx, `SELECT id,
+		CASE WHEN totp_secret IS NULL AND totp_pending_secret IS NULL THEN 0 ELSE 1 END
+		FROM administrators WHERE username=? AND status='active'`, username).Scan(&id, &hadBinding)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrInvalidCredentials
+	}
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `UPDATE administrators SET totp_secret=NULL,totp_last_step=-1,
+		totp_pending_secret=NULL,totp_pending_created_at=NULL,updated_at=? WHERE id=?`,
+		now.Format(time.RFC3339Nano), id); err != nil {
+		return err
+	}
+	revoked, err := revokeSessionsTx(ctx, tx, id, now)
+	if err != nil {
+		return err
+	}
+	osUsername := "unknown"
+	if current, err := user.Current(); err == nil {
+		osUsername = current.Username
+	}
+	if err := store.RecordAudit(ctx, tx, id, "ADMIN_TOTP_RECOVERED", "administrator", strconv.FormatInt(id, 10),
+		map[string]any{"source": "cli", "os_uid": os.Getuid(), "os_username": osUsername,
+			"revoked_sessions": revoked, "had_binding": hadBinding == 1}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

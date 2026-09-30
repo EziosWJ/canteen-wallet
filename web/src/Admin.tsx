@@ -27,7 +27,7 @@ function message(error: unknown): string {
   if (!(error instanceof AdminApiError)) return '操作失败，请稍后重试。';
   if (error.status === 401) return '管理员会话已失效，请重新登录。';
   if (error.status === 404) return '此功能的服务接口尚未开放。';
-  if (error.code === 'INVALID_CREDENTIALS') return '账号、密码或动态验证码不正确。';
+  if (error.code === 'INVALID_CREDENTIALS') return '账号、密码不正确，或该账号需要正确的动态验证码。';
   if (error.code === 'NETWORK') return error.message;
   return error.message;
 }

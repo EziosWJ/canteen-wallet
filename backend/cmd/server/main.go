@@ -68,10 +68,22 @@ func run(logger *slog.Logger) error {
 			fmt.Println(uri)
 			return nil
 		}
+		if len(os.Args) == 3 && os.Args[1] == "recover-admin-totp" {
+			db, err := store.Open(context.Background(), cfg.DatabasePath)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			if err := adminauth.RecoverTOTP(context.Background(), db, os.Args[2]); err != nil {
+				return fmt.Errorf("recover administrator second factor: %w", err)
+			}
+			fmt.Printf("Second factor cleared for %s; that administrator can now sign in with the password and bind an authenticator again.\n", os.Args[2])
+			return nil
+		}
 		if len(os.Args) == 3 && os.Args[1] == "restore-backup" {
 			return backups.Restore(context.Background(), os.Args[2], cfg.DatabasePath)
 		}
-		return fmt.Errorf("usage: canteen-server [create-admin <username>|provision-terminal <id> <name>|enroll-admin-totp <username>]")
+		return fmt.Errorf("usage: canteen-server [create-admin <username>|provision-terminal <id> <name>|enroll-admin-totp <username>|recover-admin-totp <username>|restore-backup <archive>]")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
