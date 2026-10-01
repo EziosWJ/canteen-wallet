@@ -146,6 +146,21 @@ func (s *Service) Withdraw(ctx context.Context, actorID, accountID int64, input 
 		if refundAmount < 1 {
 			return WithdrawResult{}, ErrDataIntegrity
 		}
+		// A refund posted before the full-balance account-closing payout was
+		// already returned through the wallet balance. Do not offer it again as
+		// a separate cash payout after closure.
+		var closingPayoutID int64
+		err = tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT w.id FROM transactions w
+			JOIN payout_receipts p ON p.withdrawal_transaction_id=w.id
+			WHERE w.account_id=? AND p.employee_id=? AND w.type='BALANCE_WITHDRAWAL'
+			AND w.related_transaction_id IS NULL AND w.id>?
+			ORDER BY w.id LIMIT 1),0)`, accountID, employeeID, input.RelatedRefundTransactionID).Scan(&closingPayoutID)
+		if err != nil {
+			return WithdrawResult{}, err
+		}
+		if closingPayoutID > 0 {
+			return WithdrawResult{}, ledger.ErrDuplicateReference
+		}
 		amount = refundAmount
 	default:
 		return WithdrawResult{}, ErrInvalidState

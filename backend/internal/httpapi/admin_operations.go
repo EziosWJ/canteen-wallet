@@ -1,10 +1,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -30,13 +32,29 @@ func adminOperationRoutes(admin *http.ServeMux, db *sql.DB) {
 			}
 			limit = parsed
 		}
-		cursor, _ := strconv.ParseInt(r.URL.Query().Get("cursor"), 10, 64)
+		cursor := int64(0)
+		if raw := r.URL.Query().Get("cursor"); raw != "" {
+			parsed, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || parsed < 1 {
+				WriteError(w, 400, CodeInvalidRequest, "invalid transaction cursor")
+				return
+			}
+			cursor = parsed
+		}
 		kind := r.URL.Query().Get("type")
 		if kind != "" && kind != "RECHARGE" && kind != "RECHARGE_REVERSAL" && kind != "CONSUME" && kind != "REFUND" && kind != "BALANCE_ADJUSTMENT" && kind != "BALANCE_WITHDRAWAL" {
 			WriteError(w, 400, CodeInvalidRequest, "invalid transaction type")
 			return
 		}
-		employeeID, _ := strconv.ParseInt(r.URL.Query().Get("employee_id"), 10, 64)
+		employeeID := int64(0)
+		if raw := r.URL.Query().Get("employee_id"); raw != "" {
+			parsed, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || parsed < 1 {
+				WriteError(w, 400, CodeInvalidRequest, "invalid employee id")
+				return
+			}
+			employeeID = parsed
+		}
 		from, to := r.URL.Query().Get("from"), r.URL.Query().Get("to")
 		if from != "" {
 			if _, err := time.Parse("2006-01-02", from); err != nil {
@@ -53,13 +71,17 @@ func adminOperationRoutes(admin *http.ServeMux, db *sql.DB) {
 				to = day.AddDate(0, 0, 1).Format("2006-01-02") + "T00:00:00"
 			}
 		}
-		items, err := listTransactions(r.Context(), db, cursor, limit, kind, employeeID, from, to)
+		if from != "" && to != "" && from >= to {
+			WriteError(w, 400, CodeInvalidRequest, "invalid transaction date range")
+			return
+		}
+		items, hasMore, err := listTransactions(r.Context(), db, cursor, limit, kind, employeeID, from, to)
 		if err != nil {
 			unavailable(w)
 			return
 		}
 		next := ""
-		if len(items) == limit {
+		if hasMore {
 			next = strconv.FormatInt(items[len(items)-1]["id"].(int64), 10)
 		}
 		writeJSON(w, 200, map[string]any{"items": items, "next_cursor": next})
@@ -67,6 +89,24 @@ func adminOperationRoutes(admin *http.ServeMux, db *sql.DB) {
 	admin.HandleFunc("/api/admin/transactions/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/admin/transactions/")
 		parts := strings.Split(path, "/")
+		if len(parts) == 1 && r.Method == http.MethodGet {
+			id, err := strconv.ParseInt(parts[0], 10, 64)
+			if err != nil || id < 1 {
+				notFound(w, r)
+				return
+			}
+			item, err := getAdminTransaction(r.Context(), db, id)
+			if errors.Is(err, sql.ErrNoRows) {
+				WriteError(w, http.StatusNotFound, CodeNotFound, "transaction not found")
+				return
+			}
+			if err != nil {
+				unavailable(w)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"transaction": item})
+			return
+		}
 		if len(parts) != 2 || parts[1] != "refund" {
 			notFound(w, r)
 			return
@@ -257,10 +297,86 @@ func adminOperationRoutes(admin *http.ServeMux, db *sql.DB) {
 	admin.HandleFunc("/api/admin/receipt-reviews", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			rows, err := db.QueryContext(r.Context(), `SELECT t.id,t.type,t.amount,t.administrator_id,COALESCE(rr.status,'PENDING'),COALESCE(rr.reviewer_id,0),COALESCE(rr.note,''),COALESCE(receipt.receipt_ref,''),COALESCE(receipt.collected_at,''),COALESCE(receipt.payment_method,'')
-				FROM transactions t LEFT JOIN receipt_reviews rr ON rr.transaction_id=t.id
+			limit := 50
+			if raw := r.URL.Query().Get("limit"); raw != "" {
+				parsed, err := strconv.Atoi(raw)
+				if err != nil || parsed < 1 || parsed > 200 {
+					WriteError(w, 400, CodeInvalidRequest, "invalid limit")
+					return
+				}
+				limit = parsed
+			}
+			cursor := int64(0)
+			if raw := r.URL.Query().Get("cursor"); raw != "" {
+				parsed, err := strconv.ParseInt(raw, 10, 64)
+				if err != nil || parsed < 1 {
+					WriteError(w, 400, CodeInvalidRequest, "invalid receipt review cursor")
+					return
+				}
+				cursor = parsed
+			}
+			status := r.URL.Query().Get("status")
+			if status == "" {
+				status = "PENDING"
+			}
+			if status != "PENDING" && status != "MATCHED" && status != "DIFFERENCE" && status != "RESOLVED" && status != "ALL" {
+				WriteError(w, 400, CodeInvalidRequest, "invalid receipt review status")
+				return
+			}
+			employeeID := int64(0)
+			if raw := r.URL.Query().Get("employee_id"); raw != "" {
+				parsed, err := strconv.ParseInt(raw, 10, 64)
+				if err != nil || parsed < 1 {
+					WriteError(w, 400, CodeInvalidRequest, "invalid employee id")
+					return
+				}
+				employeeID = parsed
+			}
+			fromDate, toDate := r.URL.Query().Get("from"), r.URL.Query().Get("to")
+			if day := r.URL.Query().Get("business_date"); day != "" {
+				if fromDate != "" || toDate != "" {
+					WriteError(w, 400, CodeInvalidRequest, "business_date cannot be combined with from or to")
+					return
+				}
+				fromDate, toDate = day, day
+			}
+			zone := os.Getenv("CANTEEN_TIME_ZONE")
+			if zone == "" {
+				zone = "Asia/Shanghai"
+			}
+			location, err := time.LoadLocation(zone)
+			if err != nil {
+				unavailable(w)
+				return
+			}
+			var from, to string
+			if fromDate != "" {
+				day, e := time.ParseInLocation("2006-01-02", fromDate, location)
+				if e != nil {
+					WriteError(w, 400, CodeInvalidRequest, "invalid from date")
+					return
+				}
+				from = day.UTC().Format(time.RFC3339Nano)
+			}
+			if toDate != "" {
+				day, e := time.ParseInLocation("2006-01-02", toDate, location)
+				if e != nil {
+					WriteError(w, 400, CodeInvalidRequest, "invalid to date")
+					return
+				}
+				to = day.AddDate(0, 0, 1).UTC().Format(time.RFC3339Nano)
+			}
+			if from != "" && to != "" && from >= to {
+				WriteError(w, 400, CodeInvalidRequest, "invalid receipt review date range")
+				return
+			}
+			rows, err := db.QueryContext(r.Context(), `SELECT t.id,t.transaction_no,t.type,t.amount,t.administrator_id,COALESCE(rr.status,'PENDING'),COALESCE(rr.reviewer_id,0),COALESCE(rr.note,''),COALESCE(rr.reviewed_at,''),e.id,e.employee_no,e.name,e.department,COALESCE(receipt.id,0),COALESCE(receipt.receipt_ref,''),COALESCE(receipt.collected_at,''),COALESCE(receipt.payment_method,''),COALESCE(receipt.recharge_transaction_id,0),COALESCE(t.related_transaction_id,0)
+				FROM transactions t JOIN accounts a ON a.id=t.account_id JOIN employees e ON e.id=a.employee_id
+				LEFT JOIN receipt_reviews rr ON rr.transaction_id=t.id
 				LEFT JOIN recharge_receipts receipt ON receipt.recharge_transaction_id=CASE WHEN t.type='RECHARGE' THEN t.id ELSE t.related_transaction_id END
-				WHERE t.type IN ('RECHARGE','RECHARGE_REVERSAL') ORDER BY t.id DESC LIMIT 200`)
+				WHERE t.type IN ('RECHARGE','RECHARGE_REVERSAL') AND (?=0 OR t.id<?) AND (?=0 OR e.id=?)
+				AND (?='ALL' OR COALESCE(rr.status,'PENDING')=?) AND (?='' OR t.created_at>=?) AND (?='' OR t.created_at<?)
+				ORDER BY t.id DESC LIMIT ?`, cursor, cursor, employeeID, employeeID, status, status, from, from, to, to, limit+1)
 			if err != nil {
 				unavailable(w)
 				return
@@ -268,19 +384,27 @@ func adminOperationRoutes(admin *http.ServeMux, db *sql.DB) {
 			defer rows.Close()
 			items := make([]map[string]any, 0)
 			for rows.Next() {
-				var id, amount, actor, reviewer int64
-				var kind, status, note, receiptRef, collectedAt, paymentMethod string
-				if err := rows.Scan(&id, &kind, &amount, &actor, &status, &reviewer, &note, &receiptRef, &collectedAt, &paymentMethod); err != nil {
+				var id, amount, actor, reviewer, empID, receiptID, rechargeID, relatedID int64
+				var number, kind, itemStatus, note, reviewedAt, employeeNo, employeeName, department, receiptRef, collectedAt, paymentMethod string
+				if err := rows.Scan(&id, &number, &kind, &amount, &actor, &itemStatus, &reviewer, &note, &reviewedAt, &empID, &employeeNo, &employeeName, &department, &receiptID, &receiptRef, &collectedAt, &paymentMethod, &rechargeID, &relatedID); err != nil {
 					unavailable(w)
 					return
 				}
-				items = append(items, map[string]any{"transaction_id": id, "type": kind, "amount_cents": amount, "entered_by": actor, "status": status, "reviewer_id": reviewer, "note": note, "receipt_ref": receiptRef, "collected_at": collectedAt, "payment_method": paymentMethod})
+				items = append(items, map[string]any{"transaction_id": id, "transaction_no": number, "type": kind, "amount_cents": amount, "entered_by": actor, "status": itemStatus, "reviewer_id": reviewer, "note": note, "reviewed_at": reviewedAt, "employee_id": empID, "employee_no": employeeNo, "employee_name": employeeName, "department": department, "receipt_id": receiptID, "receipt_ref": receiptRef, "collected_at": collectedAt, "payment_method": paymentMethod, "recharge_transaction_id": rechargeID, "related_transaction_id": relatedID})
 			}
 			if rows.Err() != nil {
 				unavailable(w)
 				return
 			}
-			writeJSON(w, 200, map[string]any{"items": items})
+			hasMore := len(items) > limit
+			if hasMore {
+				items = items[:limit]
+			}
+			next := ""
+			if hasMore {
+				next = strconv.FormatInt(items[len(items)-1]["transaction_id"].(int64), 10)
+			}
+			writeJSON(w, 200, map[string]any{"items": items, "next_cursor": next})
 		case http.MethodPost:
 			var input struct {
 				TransactionID int64  `json:"transaction_id"`
@@ -327,6 +451,17 @@ func adminOperationRoutes(admin *http.ServeMux, db *sql.DB) {
 					unavailable(w)
 					return
 				}
+			} else {
+				var prior string
+				err = tx.QueryRowContext(r.Context(), `SELECT status FROM receipt_reviews WHERE transaction_id=?`, input.TransactionID).Scan(&prior)
+				if err == nil && prior != "PENDING" {
+					WriteError(w, 409, CodeConflict, "only pending receipts can be matched or marked different")
+					return
+				}
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					unavailable(w)
+					return
+				}
 			}
 			_, err = tx.ExecContext(r.Context(), `INSERT INTO receipt_reviews(transaction_id,reviewer_id,status,note,reviewed_at) VALUES(?,?,?,?,?) ON CONFLICT(transaction_id) DO UPDATE SET reviewer_id=excluded.reviewer_id,status=excluded.status,note=excluded.note,reviewed_at=excluded.reviewed_at`, input.TransactionID, actor, input.Status, input.Note, time.Now().UTC().Format(time.RFC3339Nano))
 			if err != nil {
@@ -345,6 +480,30 @@ func adminOperationRoutes(admin *http.ServeMux, db *sql.DB) {
 		default:
 			methodPost(w)
 		}
+	})
+	admin.HandleFunc("/api/admin/receipt-reviews/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodPost(w)
+			return
+		}
+		id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/api/admin/receipt-reviews/"), 10, 64)
+		if err != nil || id < 1 {
+			notFound(w, r)
+			return
+		}
+		var input struct {
+			Status string `json:"status"`
+			Note   string `json:"note"`
+		}
+		if !decodeJSON(w, r, 2048, &input) {
+			return
+		}
+		body, _ := json.Marshal(map[string]any{"transaction_id": id, "status": input.Status, "note": input.Note})
+		copy := r.Clone(r.Context())
+		copy.URL.Path = "/api/admin/receipt-reviews"
+		copy.Body = io.NopCloser(bytes.NewReader(body))
+		copy.ContentLength = int64(len(body))
+		admin.ServeHTTP(w, copy)
 	})
 	manualSupplyRoutes(admin, db)
 }
@@ -374,22 +533,182 @@ func fundError(w http.ResponseWriter, err error) {
 	}
 }
 
-func listTransactions(ctx context.Context, db *sql.DB, cursor int64, limit int, kind string, employeeID int64, from, to string) ([]map[string]any, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id,account_id,type,amount,before_balance,after_balance,business_type,business_id,COALESCE(related_transaction_id,0),COALESCE(administrator_id,0),COALESCE(terminal_id,''),COALESCE(reason,''),created_at FROM transactions WHERE (?=0 OR id<?) AND (?='' OR type=?) AND (?=0 OR account_id=(SELECT id FROM accounts WHERE employee_id=?)) AND (?='' OR created_at>=?) AND (?='' OR created_at<?) ORDER BY id DESC LIMIT ?`, cursor, cursor, kind, kind, employeeID, employeeID, from, from, to, to, limit)
+func listTransactions(ctx context.Context, db *sql.DB, cursor int64, limit int, kind string, employeeID int64, from, to string) ([]map[string]any, bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT t.id,t.transaction_no,t.account_id,t.type,t.amount,t.before_balance,t.after_balance,t.business_type,t.business_id,COALESCE(t.related_transaction_id,0),COALESCE(t.administrator_id,0),COALESCE(t.terminal_id,''),COALESCE(t.reason,''),t.created_at,
+		e.id,e.employee_no,e.name,e.phone,e.department,
+		COALESCE((SELECT id FROM transactions f WHERE f.type='REFUND' AND f.related_transaction_id=t.id LIMIT 1),0),
+		COALESCE((SELECT id FROM transactions v WHERE v.type='RECHARGE_REVERSAL' AND v.related_transaction_id=t.id LIMIT 1),0),
+		r.id,r.transaction_no,r.type,r.amount,a.status,
+		COALESCE((SELECT w.id FROM transactions w JOIN payout_receipts p ON p.withdrawal_transaction_id=w.id
+			WHERE w.type='BALANCE_WITHDRAWAL' AND w.account_id=t.account_id AND p.employee_id=e.id
+			AND (w.related_transaction_id=t.id OR (w.related_transaction_id IS NULL AND w.id>t.id))
+			ORDER BY w.id LIMIT 1),0)
+		FROM transactions t JOIN accounts a ON a.id=t.account_id JOIN employees e ON e.id=a.employee_id
+		LEFT JOIN transactions r ON r.id=t.related_transaction_id
+		WHERE (?=0 OR t.id<?) AND (?='' OR t.type=?) AND (?=0 OR e.id=?) AND (?='' OR t.created_at>=?) AND (?='' OR t.created_at<?)
+		ORDER BY t.id DESC LIMIT ?`, cursor, cursor, kind, kind, employeeID, employeeID, from, from, to, to, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	items := make([]map[string]any, 0, limit)
+	for rows.Next() {
+		var accountStatus string
+		var withdrawalID int64
+		item, err := scanAdminTransaction(rows, &accountStatus, &withdrawalID)
+		if err != nil {
+			return nil, false, err
+		}
+		item["payout_status"] = "NOT_APPLICABLE"
+		item["withdrawal_transaction_id"] = nil
+		if item["type"] == "REFUND" {
+			if withdrawalID > 0 {
+				item["payout_status"] = "PAID"
+				item["withdrawal_transaction_id"] = withdrawalID
+			} else if accountStatus == "CLOSED" {
+				item["payout_status"] = "AVAILABLE"
+			}
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	return items, hasMore, nil
+}
+
+type adminTransactionScanner interface{ Scan(...any) error }
+
+func scanAdminTransaction(row adminTransactionScanner, extraDestinations ...any) (map[string]any, error) {
+	var id, account, amount, before, after, related, actor int64
+	var transactionNo, kind, businessType, businessID, terminalID, reason, created string
+	var employeeID int64
+	var employeeNo, employeeName, phone, department string
+	var refundID, reversalID int64
+	var relatedID sql.NullInt64
+	var relatedNo, relatedType sql.NullString
+	var relatedAmount sql.NullInt64
+	destinations := []any{&id, &transactionNo, &account, &kind, &amount, &before, &after, &businessType, &businessID, &related, &actor, &terminalID, &reason, &created,
+		&employeeID, &employeeNo, &employeeName, &phone, &department, &refundID, &reversalID,
+		&relatedID, &relatedNo, &relatedType, &relatedAmount}
+	destinations = append(destinations, extraDestinations...)
+	if err := row.Scan(destinations...); err != nil {
+		return nil, err
+	}
+	refundStatus, canRefund, refundReason := "NOT_APPLICABLE", false, "not_consumption"
+	if kind == "CONSUME" {
+		refundStatus, canRefund, refundReason = "AVAILABLE", refundID == 0, "already_refunded"
+		if refundID != 0 {
+			refundStatus = "REFUNDED"
+		} else {
+			refundReason = ""
+		}
+	}
+	reversalStatus, canReverse, reversalReason := "NOT_APPLICABLE", false, "not_recharge"
+	if kind == "RECHARGE" {
+		reversalStatus, canReverse, reversalReason = "AVAILABLE", reversalID == 0, "already_reversed"
+		if reversalID != 0 {
+			reversalStatus = "REVERSED"
+		} else {
+			reversalReason = ""
+		}
+	}
+	item := map[string]any{"id": id, "transaction_no": transactionNo, "account_id": account,
+		"employee_id": employeeID, "employee_no": employeeNo, "employee_name": employeeName, "employee_phone": phone, "department": department,
+		"type": kind, "amount_cents": amount, "before_balance_cents": before, "after_balance_cents": after,
+		"business_type": businessType, "business_id": businessID, "related_transaction_id": related,
+		"administrator_id": actor, "terminal_id": terminalID, "reason": reason, "created_at": created,
+		"refund_status": refundStatus, "can_refund": canRefund, "refund_block_reason": refundReason,
+		"reversal_status": reversalStatus, "can_reverse": canReverse, "reversal_block_reason": reversalReason}
+	if relatedID.Valid {
+		item["related_transaction"] = map[string]any{"id": relatedID.Int64, "transaction_no": relatedNo.String, "type": relatedType.String, "amount_cents": relatedAmount.Int64}
+	} else {
+		item["related_transaction"] = nil
+	}
+	return item, nil
+}
+
+func getAdminTransaction(ctx context.Context, db *sql.DB, id int64) (map[string]any, error) {
+	row := db.QueryRowContext(ctx, `SELECT t.id,t.transaction_no,t.account_id,t.type,t.amount,t.before_balance,t.after_balance,t.business_type,t.business_id,COALESCE(t.related_transaction_id,0),COALESCE(t.administrator_id,0),COALESCE(t.terminal_id,''),COALESCE(t.reason,''),t.created_at,
+		e.id,e.employee_no,e.name,e.phone,e.department,
+		COALESCE((SELECT id FROM transactions f WHERE f.type='REFUND' AND f.related_transaction_id=t.id LIMIT 1),0),
+		COALESCE((SELECT id FROM transactions v WHERE v.type='RECHARGE_REVERSAL' AND v.related_transaction_id=t.id LIMIT 1),0),
+		r.id,r.transaction_no,r.type,r.amount
+		FROM transactions t JOIN accounts a ON a.id=t.account_id JOIN employees e ON e.id=a.employee_id
+		LEFT JOIN transactions r ON r.id=t.related_transaction_id WHERE t.id=?`, id)
+	item, err := scanAdminTransaction(row)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, account, amount, before, after, related, actor int64
-		var kind, businessType, businessID, terminalID, reason, created string
-		if err := rows.Scan(&id, &account, &kind, &amount, &before, &after, &businessType, &businessID, &related, &actor, &terminalID, &reason, &created); err != nil {
-			return nil, err
-		}
-		items = append(items, map[string]any{"id": id, "account_id": account, "type": kind, "amount_cents": amount, "before_balance_cents": before, "after_balance_cents": after, "business_type": businessType, "business_id": businessID, "related_transaction_id": related, "administrator_id": actor, "terminal_id": terminalID, "reason": reason, "created_at": created})
+	var balance, withdrawalID int64
+	var accountStatus, employeeStatus string
+	var detailKind, businessType string
+	var mealCode, mealName, businessDate sql.NullString
+	var mealAmount sql.NullInt64
+	var manualMealCode, manualBusinessDate sql.NullString
+	var manualMealAmount sql.NullInt64
+	var receiptID, receiptAmount sql.NullInt64
+	var receiptRef, collectedAt, paymentMethod sql.NullString
+	var enteredByID sql.NullInt64
+	var enteredByName sql.NullString
+	err = db.QueryRowContext(ctx, `SELECT a.balance,a.status,e.status,t.type,t.business_type,
+		d.meal_code,d.meal_name,d.business_date,d.amount_cents,
+		ms.meal_code,ms.business_date,ms.amount_cents,
+		rc.id,rc.receipt_ref,rc.amount_cents,rc.collected_at,rc.payment_method,
+		entered.id,entered.username,
+		COALESCE((SELECT w.id FROM transactions w JOIN payout_receipts p ON p.withdrawal_transaction_id=w.id
+			WHERE w.type='BALANCE_WITHDRAWAL' AND w.account_id=t.account_id AND p.employee_id=e.id
+			AND (w.related_transaction_id=t.id OR (w.related_transaction_id IS NULL AND w.id>t.id))
+			ORDER BY w.id LIMIT 1),0)
+		FROM transactions t JOIN accounts a ON a.id=t.account_id JOIN employees e ON e.id=a.employee_id
+		LEFT JOIN consumption_details d ON d.transaction_id=t.id
+		LEFT JOIN manual_supplies ms ON ms.transaction_id=t.id AND ms.status='POSTED' AND t.type='CONSUME' AND t.business_type='MANUAL_SUPPLY'
+		LEFT JOIN recharge_receipts rc ON rc.recharge_transaction_id=CASE WHEN t.type='RECHARGE' THEN t.id WHEN t.type='RECHARGE_REVERSAL' THEN t.related_transaction_id ELSE 0 END
+		LEFT JOIN administrators entered ON entered.id=t.administrator_id
+		WHERE t.id=?`, id).Scan(&balance, &accountStatus, &employeeStatus, &detailKind, &businessType,
+		&mealCode, &mealName, &businessDate, &mealAmount,
+		&manualMealCode, &manualBusinessDate, &manualMealAmount,
+		&receiptID, &receiptRef, &receiptAmount, &collectedAt, &paymentMethod,
+		&enteredByID, &enteredByName, &withdrawalID)
+	if err != nil {
+		return nil, err
 	}
-	return items, rows.Err()
+	item["current_balance_cents"] = balance
+	item["account_status"] = accountStatus
+	item["employee_status"] = employeeStatus
+	item["meal_snapshot"] = nil
+	if detailKind == "CONSUME" {
+		if mealCode.Valid {
+			item["meal_snapshot"] = map[string]any{"source": businessType, "meal_code": mealCode.String, "meal_name": mealName.String, "business_date": businessDate.String, "amount_cents": mealAmount.Int64}
+		} else if manualMealCode.Valid {
+			// Manual supply records persist code/date/amount, but never stored a
+			// meal name. Do not infer that historical name from current meal config.
+			item["meal_snapshot"] = map[string]any{"source": businessType, "meal_code": manualMealCode.String, "meal_name": nil, "business_date": manualBusinessDate.String, "amount_cents": manualMealAmount.Int64}
+		}
+	}
+	item["recharge_receipt"] = nil
+	if receiptID.Valid {
+		item["recharge_receipt"] = map[string]any{"id": receiptID.Int64, "receipt_ref": receiptRef.String, "amount_cents": receiptAmount.Int64, "collected_at": collectedAt.String, "payment_method": paymentMethod.String}
+	}
+	item["entered_by"] = nil
+	if enteredByID.Valid {
+		item["entered_by"] = map[string]any{"id": enteredByID.Int64, "username": enteredByName.String}
+	}
+	item["withdrawal_transaction_id"] = nil
+	item["payout_status"] = "NOT_APPLICABLE"
+	if detailKind == "REFUND" {
+		if withdrawalID > 0 {
+			item["withdrawal_transaction_id"] = withdrawalID
+			item["payout_status"] = "PAID"
+		} else if accountStatus == "CLOSED" {
+			item["payout_status"] = "AVAILABLE"
+		}
+	}
+	return item, nil
 }
 
 func createDaily(ctx context.Context, db *sql.DB, date string, actor int64) (map[string]any, error) {

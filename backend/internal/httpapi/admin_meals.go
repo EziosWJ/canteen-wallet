@@ -10,17 +10,36 @@ import (
 
 func adminMealRoutes(admin *http.ServeMux, service *meals.Service) {
 	admin.HandleFunc("/api/admin/meal-periods", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", "GET")
+		switch r.Method {
+		case http.MethodGet:
+			periods, err := service.List(r.Context())
+			if err != nil {
+				WriteError(w, http.StatusServiceUnavailable, CodeServiceUnavailable, "service is not ready")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"meal_periods": periods})
+		case http.MethodPut:
+			var input struct {
+				MealPeriods []meals.PeriodInput `json:"meal_periods"`
+			}
+			if !decodeJSON(w, r, 8192, &input) {
+				return
+			}
+			periods, err := service.UpdateAll(r.Context(), principalFromContext(r.Context()).ID, input.MealPeriods)
+			switch {
+			case errors.Is(err, meals.ErrInvalidPeriod):
+				WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid meal periods")
+			case errors.Is(err, meals.ErrOverlap):
+				WriteError(w, http.StatusConflict, CodeConflict, "meal periods overlap")
+			case err != nil:
+				WriteError(w, http.StatusServiceUnavailable, CodeServiceUnavailable, "service is not ready")
+			default:
+				writeJSON(w, http.StatusOK, map[string]any{"meal_periods": periods})
+			}
+		default:
+			w.Header().Set("Allow", "GET, PUT")
 			WriteError(w, http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method not allowed")
-			return
 		}
-		periods, err := service.List(r.Context())
-		if err != nil {
-			WriteError(w, http.StatusServiceUnavailable, CodeServiceUnavailable, "service is not ready")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"meal_periods": periods})
 	})
 	admin.HandleFunc("/api/admin/meal-periods/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {

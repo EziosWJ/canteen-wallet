@@ -55,6 +55,22 @@ type Employee struct {
 	MustChangePassword bool    `json:"must_change_password"`
 }
 
+// SearchInput describes one stable, keyset-paginated employee search. A zero
+// limit selects the default page size. Cursor is an opaque token returned by
+// the previous page; it is tied to the globally unique employee ID ordering.
+type SearchInput struct {
+	Query        string
+	Department   string
+	AccountState string
+	Cursor       string
+	Limit        int
+}
+
+type EmployeePage struct {
+	Employees  []Employee `json:"employees"`
+	NextCursor string     `json:"next_cursor,omitempty"`
+}
+
 func New(db *sql.DB) *Service { return &Service{db: db, loginGate: make(chan struct{}, 2)} }
 
 func (s *Service) Create(ctx context.Context, actorID int64, input CreateInput) (Employee, string, error) {
@@ -145,6 +161,76 @@ func (s *Service) List(ctx context.Context) ([]Employee, error) {
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// Search returns employees matching identity fields and exact department or
+// account-state filters. Results use employee ID as a stable keyset cursor so
+// records can be found past the first page without loading a fixed-size list.
+func (s *Service) Search(ctx context.Context, input SearchInput) (EmployeePage, error) {
+	input.Query = strings.TrimSpace(input.Query)
+	input.Department = strings.TrimSpace(input.Department)
+	input.AccountState = strings.TrimSpace(strings.ToUpper(input.AccountState))
+	if input.Limit == 0 {
+		input.Limit = 50
+	}
+	if input.Limit < 1 || input.Limit > 100 {
+		return EmployeePage{}, ErrInvalidInput
+	}
+	if input.AccountState != "" && input.AccountState != "ACTIVE" && input.AccountState != "FROZEN" && input.AccountState != "CLOSED" {
+		return EmployeePage{}, ErrInvalidInput
+	}
+	lastID := int64(0)
+	if input.Cursor != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(input.Cursor)
+		if err != nil {
+			return EmployeePage{}, ErrInvalidInput
+		}
+		parsed, err := strconv.ParseInt(string(raw), 10, 64)
+		if err != nil || parsed < 1 {
+			return EmployeePage{}, ErrInvalidInput
+		}
+		lastID = parsed
+	}
+	search := escapeLike(input.Query)
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, a.id, e.employee_no, e.name, e.phone, e.department, e.photo_url,
+		e.status, a.status, a.balance, e.must_change_password
+		FROM employees e JOIN accounts a ON a.employee_id = e.id
+		WHERE e.id > ?
+		AND (? = '' OR e.name LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
+			OR e.employee_no LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
+			OR e.phone LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE)
+		AND (? = '' OR e.department = ? COLLATE NOCASE)
+		AND (? = '' OR a.status = ?)
+		ORDER BY e.id ASC LIMIT ?`, lastID, search, search, search, search,
+		input.Department, input.Department, input.AccountState, input.AccountState, input.Limit+1)
+	if err != nil {
+		return EmployeePage{}, err
+	}
+	defer rows.Close()
+	items := make([]Employee, 0, input.Limit+1)
+	for rows.Next() {
+		item, err := scanEmployee(rows)
+		if err != nil {
+			return EmployeePage{}, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return EmployeePage{}, err
+	}
+	page := EmployeePage{Employees: items}
+	if len(items) > input.Limit {
+		items = items[:input.Limit]
+		page.Employees = items
+		page.NextCursor = base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(items[len(items)-1].ID, 10)))
+	}
+	return page, nil
+}
+
+func escapeLike(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	return strings.ReplaceAll(value, `_`, `\_`)
 }
 
 // UpdateProfile changes employee identity fields without touching account funds

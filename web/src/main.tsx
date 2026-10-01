@@ -9,7 +9,7 @@ import './styles.css';
 // identity, amount or meal. It is a normal deep link, so login and the forced
 // temporary-password change return the employee straight back to it.
 const path = window.location.pathname.replace(/\/$/, '') || '/';
-const page = path === '/admin' ? <Admin/>
+const page = path === '/admin' || path.startsWith('/admin/') ? <Admin/>
   : path === '/terminal' ? <Terminal/>
   : path === '/self-service' ? <SelfService/>
   : <App/>;

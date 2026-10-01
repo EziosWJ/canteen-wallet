@@ -12,10 +12,10 @@ tasks:
       - task: backend:build
 
   run:
-    desc: 构建并运行嵌入式 Go Server
+    desc: 构建并运行嵌入式 Go Server（公开监听默认 0.0.0.0，可用 CANTEEN_PUBLIC_ADDR 覆盖）
     cmds:
       - task: build
-      - cd backend && ../build/canteen-server
+      - cd backend && CANTEEN_PUBLIC_ADDR="${CANTEEN_PUBLIC_ADDR:-0.0.0.0:5001}" ../build/canteen-server
 
   web:install:
     desc: 安装前端锁定依赖

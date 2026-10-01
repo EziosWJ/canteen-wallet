@@ -23,7 +23,7 @@ task run
 
 `task build` 执行前端依赖安装与 TypeScript/Vite 生产编译，将 `web/dist` 复制到 `backend/internal/webassets/dist`，再生成 `build/canteen-server`、`build/canteen-scan-agent` 和 `build/canteen-scan-sim`。`task run` 会先完整构建，再前台启动服务二进制。服务在公开监听上提供嵌入页面和同源 `/api`；内部终端 API 由独立监听提供。`web/dist`、嵌入副本和二进制均为生成物，不提交到 Git。`task backend:compile` 可单独编译检查所有 Go 包；`task dev:backend` 与 `task dev:web` 分别启动本地后端和 Vite 开发服务器，需在两个终端运行。
 
-Vite 将 `/api` 代理到 `127.0.0.1:8080`；`CANTEEN_WEB_API_TARGET` 可改代理目标。默认公开 HTTP 监听 `127.0.0.1:8080`，内部终端 HTTP 监听 `127.0.0.1:8081`，数据库位于 `backend/data/canteen.db`。正式环境由 HTTPS 反向代理暴露公开入口，内部终端入口仅供现场设备访问。
+Vite 将 `/api` 代理到 `127.0.0.1:8080`；`CANTEEN_WEB_API_TARGET` 可改代理目标。`task run` 将公开监听默认设为 `0.0.0.0:5001`（可用 `CANTEEN_PUBLIC_ADDR` 覆盖，例如改回 `127.0.0.1:5001`）；直接运行服务二进制时公开监听默认 `127.0.0.1:5001`，内部终端 HTTP 监听 `127.0.0.1:8081`，数据库位于 `backend/data/canteen.db`。正式环境由 HTTPS 反向代理暴露公开入口，内部终端入口仅供现场设备访问。
 
 `CANTEEN_PUBLIC_ADDR`、`CANTEEN_INTERNAL_ADDR`、`CANTEEN_DB_PATH`、`CANTEEN_TIME_ZONE` 分别配置监听地址、数据库路径和餐次时区（默认 `Asia/Shanghai`）。服务启动时自动创建 SQLite 数据库，启用 WAL、外键和忙等待并执行尚未应用的迁移；已应用迁移不可修改。
 

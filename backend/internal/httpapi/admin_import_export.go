@@ -36,6 +36,21 @@ var employeeNoFormat = regexp.MustCompile(`^[A-Za-z0-9._-]{1,32}$`)
 var phoneFormat = regexp.MustCompile(`^1[3-9][0-9]{9}$`)
 
 func adminImportExportRoutes(admin *http.ServeMux, db *sql.DB, employeeService *employees.Service) {
+	admin.HandleFunc("/api/admin/imports/template", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodGet(w)
+			return
+		}
+		body, err := xlsx.EmployeeImportTemplate()
+		if err != nil {
+			unavailable(w)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+		w.Header().Set("Content-Disposition", `attachment; filename="employee-import-template.xlsx"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	})
 	admin.HandleFunc("/api/admin/imports/preview", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			methodPost(w)
@@ -62,7 +77,7 @@ func adminImportExportRoutes(admin *http.ServeMux, db *sql.DB, employeeService *
 			WriteError(w, 400, CodeInvalidRequest, "invalid XLSX workbook")
 			return
 		}
-		if len(matrix) < 2 || strings.Join(matrix[0][:5], "|") != "employee_no|name|phone|department|status" {
+		if len(matrix) < 2 || len(matrix[0]) < 5 || strings.Join(matrix[0][:5], "|") != "employee_no|name|phone|department|status" {
 			WriteError(w, 400, CodeInvalidRequest, "header must be employee_no,name,phone,department,status")
 			return
 		}
@@ -71,10 +86,22 @@ func adminImportExportRoutes(admin *http.ServeMux, db *sql.DB, employeeService *
 		seenNo := map[string]bool{}
 		seenPhone := map[string]bool{}
 		for index, values := range matrix[1:] {
-			if len(values) < 5 {
-				continue
+			item := importRow{Row: index + 2}
+			if len(values) > 0 {
+				item.EmployeeNo = values[0]
 			}
-			item := importRow{Row: index + 2, EmployeeNo: values[0], Name: values[1], Phone: values[2], Department: values[3], Status: values[4]}
+			if len(values) > 1 {
+				item.Name = values[1]
+			}
+			if len(values) > 2 {
+				item.Phone = values[2]
+			}
+			if len(values) > 3 {
+				item.Department = values[3]
+			}
+			if len(values) > 4 {
+				item.Status = values[4]
+			}
 			if item.EmployeeNo == "" && item.Name == "" && item.Phone == "" && item.Department == "" {
 				continue
 			}
@@ -82,7 +109,7 @@ func adminImportExportRoutes(admin *http.ServeMux, db *sql.DB, employeeService *
 				item.Status = "ACTIVE"
 			}
 			rows = append(rows, item)
-			if !employeeNoFormat.MatchString(item.EmployeeNo) || len(item.Name) < 1 || len(item.Name) > 100 || !phoneFormat.MatchString(item.Phone) || len(item.Department) < 1 || len(item.Department) > 100 || (item.Status != "ACTIVE" && item.Status != "FROZEN") {
+			if len(values) < 5 || !employeeNoFormat.MatchString(item.EmployeeNo) || len(item.Name) < 1 || len(item.Name) > 100 || !phoneFormat.MatchString(item.Phone) || len(item.Department) < 1 || len(item.Department) > 100 || (item.Status != "ACTIVE" && item.Status != "FROZEN") {
 				problems = append(problems, importError{item.Row, "invalid employee fields"})
 				continue
 			}
@@ -118,7 +145,8 @@ func adminImportExportRoutes(admin *http.ServeMux, db *sql.DB, employeeService *
 			unavailable(w)
 			return
 		}
-		writeJSON(w, 200, map[string]any{"preview_id": id, "rows": rows, "errors": problems})
+		writeJSON(w, 200, map[string]any{"preview_id": id, "rows": rows, "errors": problems,
+			"total_rows": len(rows), "valid_rows": len(rows) - len(problems), "error_rows": len(problems)})
 	})
 	admin.HandleFunc("/api/admin/imports/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/admin/imports/")
@@ -183,8 +211,12 @@ func adminImportExportRoutes(admin *http.ServeMux, db *sql.DB, employeeService *
 			unavailable(w)
 			return
 		}
-		if confirmed.Valid || time.Since(createdTime) > time.Hour {
-			WriteError(w, 409, CodeConflict, "preview expired or already confirmed")
+		if confirmed.Valid {
+			WriteError(w, 409, CodeConflict, "preview already confirmed")
+			return
+		}
+		if time.Since(createdTime) > time.Hour {
+			WriteError(w, http.StatusGone, CodeConflict, "preview expired; upload the file again")
 			return
 		}
 		var rows []importRow
@@ -198,24 +230,41 @@ func adminImportExportRoutes(admin *http.ServeMux, db *sql.DB, employeeService *
 			invalidRows[problem.Row] = true
 		}
 		created := make([]map[string]any, 0)
+		// Claim the preview before creating records. A replay (including a
+		// concurrent second request) can never receive temporary passwords again.
+		claimedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		claim, err := db.ExecContext(r.Context(), `UPDATE import_previews SET confirmed_at=? WHERE id=? AND administrator_id=? AND confirmed_at IS NULL`, claimedAt, id, principalFromContext(r.Context()).ID)
+		if err != nil {
+			unavailable(w)
+			return
+		}
+		if n, _ := claim.RowsAffected(); n != 1 {
+			WriteError(w, 409, CodeConflict, "preview already confirmed")
+			return
+		}
 		for _, item := range rows {
 			if invalidRows[item.Row] {
 				continue
 			}
 			employee, password, err := employeeService.Create(r.Context(), principalFromContext(r.Context()).ID, employees.CreateInput{EmployeeNo: item.EmployeeNo, Name: item.Name, Phone: item.Phone, Department: item.Department, Status: item.Status})
 			if err != nil {
-				problems = append(problems, importError{item.Row, "could not create employee"})
+				message := "could not create employee"
+				if errors.Is(err, employees.ErrConflict) {
+					message = "employee number or phone already exists"
+				}
+				problems = append(problems, importError{item.Row, message})
 				continue
 			}
 			created = append(created, map[string]any{"employee": employee, "temporary_password": password})
 		}
 		encodedProblems, _ := json.Marshal(problems)
-		_, err = db.ExecContext(r.Context(), `UPDATE import_previews SET confirmed_at=?,errors_json=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), string(encodedProblems), id)
+		_, err = db.ExecContext(r.Context(), `UPDATE import_previews SET errors_json=? WHERE id=? AND administrator_id=?`, string(encodedProblems), id, principalFromContext(r.Context()).ID)
 		if err != nil {
 			unavailable(w)
 			return
 		}
-		writeJSON(w, 200, map[string]any{"created": created, "errors": problems})
+		writeJSON(w, 200, map[string]any{"created": created, "errors": problems,
+			"total_rows": len(rows), "created_rows": len(created), "error_rows": len(problems)})
 	})
 	admin.HandleFunc("/api/admin/exports/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -225,42 +274,178 @@ func adminImportExportRoutes(admin *http.ServeMux, db *sql.DB, employeeService *
 		kind := strings.TrimPrefix(r.URL.Path, "/api/admin/exports/")
 		var query string
 		var header []string
+		var args []any
+		allowed := map[string]bool{"all": true}
 		switch kind {
 		case "employees":
-			query = `SELECT employee_no,name,phone,department,status FROM employees ORDER BY id`
+			allowed["q"], allowed["department"], allowed["account_status"] = true, true, true
+			where := ` WHERE (?='' OR e.name LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE OR e.employee_no LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE OR e.phone LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE)
+				AND (?='' OR e.department=? COLLATE NOCASE) AND (?='' OR a.status=?)`
+			query = `SELECT e.employee_no,e.name,e.phone,e.department,e.status FROM employees e JOIN accounts a ON a.employee_id=e.id` + where + ` ORDER BY e.id`
 			header = []string{"employee_no", "name", "phone", "department", "status"}
+			args = append(args, "", "", "", "", "", "", "", "")
 		case "balances":
-			query = `SELECT e.employee_no,e.name,a.balance,a.status FROM accounts a JOIN employees e ON e.id=a.employee_id ORDER BY e.id`
+			allowed["q"], allowed["department"], allowed["account_status"] = true, true, true
+			where := ` WHERE (?='' OR e.name LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE OR e.employee_no LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE OR e.phone LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE)
+				AND (?='' OR e.department=? COLLATE NOCASE) AND (?='' OR a.status=?)`
+			query = `SELECT e.employee_no,e.name,a.balance,a.status FROM accounts a JOIN employees e ON e.id=a.employee_id` + where + ` ORDER BY e.id`
 			header = []string{"employee_no", "name", "balance_cents", "status"}
+			args = append(args, "", "", "", "", "", "", "", "")
 		case "transactions":
-			query = `SELECT transaction_no,type,amount,before_balance,after_balance,business_type,business_id,created_at FROM transactions ORDER BY id`
+			allowed["employee_id"], allowed["type"], allowed["from"], allowed["to"] = true, true, true, true
+			query = `SELECT t.transaction_no,t.type,t.amount,t.before_balance,t.after_balance,t.business_type,t.business_id,t.created_at FROM transactions t JOIN accounts a ON a.id=t.account_id JOIN employees e ON e.id=a.employee_id
+				WHERE (?=0 OR e.id=?) AND (?='' OR t.type=?) AND (?='' OR t.created_at>=?) AND (?='' OR t.created_at<?) ORDER BY t.id`
 			header = []string{"transaction_no", "type", "amount_cents", "before_balance_cents", "after_balance_cents", "business_type", "business_id", "created_at"}
+			args = append(args, int64(0), int64(0), "", "", "", "", "", "")
 		case "reconciliation":
-			query = `SELECT business_date,opening_cents,movement_cents,expected_cents,actual_cents,difference_cents FROM daily_reconciliation ORDER BY business_date`
+			allowed["business_date"], allowed["from"], allowed["to"] = true, true, true
+			query = `SELECT business_date,opening_cents,movement_cents,expected_cents,actual_cents,difference_cents FROM daily_reconciliation WHERE (?='' OR business_date=?) AND (?='' OR business_date>=?) AND (?='' OR business_date<=?) ORDER BY business_date`
 			header = []string{"business_date", "opening_cents", "movement_cents", "expected_cents", "actual_cents", "difference_cents"}
+			args = append(args, "", "", "", "", "", "")
 		default:
 			notFound(w, r)
 			return
 		}
-		rows, err := db.QueryContext(r.Context(), query)
+		values := r.URL.Query()
+		all := values.Get("all") == "1"
+		if len(values["all"]) > 1 || (len(values["all"]) == 1 && values.Get("all") != "1") {
+			WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "all must be 1")
+			return
+		}
+		if !all {
+			for key, items := range values {
+				if !allowed[key] || len(items) != 1 {
+					WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid export filter")
+					return
+				}
+			}
+			get := func(key string) string { return values.Get(key) }
+			switch kind {
+			case "employees", "balances":
+				status := strings.ToUpper(strings.TrimSpace(get("account_status")))
+				if status != "" && status != "ACTIVE" && status != "FROZEN" && status != "CLOSED" {
+					WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid account_status")
+					return
+				}
+				q, department := strings.TrimSpace(get("q")), strings.TrimSpace(get("department"))
+				q = strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(q)
+				args = []any{q, q, q, q, department, department, status, status}
+			case "transactions":
+				id := int64(0)
+				if raw := get("employee_id"); raw != "" {
+					parsed, err := strconv.ParseInt(raw, 10, 64)
+					if err != nil || parsed < 1 {
+						WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid employee_id")
+						return
+					}
+					id = parsed
+				}
+				typeFilter := get("type")
+				if typeFilter != "" && typeFilter != "RECHARGE" && typeFilter != "RECHARGE_REVERSAL" && typeFilter != "CONSUME" && typeFilter != "REFUND" && typeFilter != "BALANCE_ADJUSTMENT" && typeFilter != "BALANCE_WITHDRAWAL" {
+					WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid transaction type")
+					return
+				}
+				from, to := get("from"), get("to")
+				if from != "" {
+					if _, err := time.Parse("2006-01-02", from); err != nil {
+						WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid from date")
+						return
+					}
+					from += "T00:00:00"
+				}
+				if to != "" {
+					day, err := time.Parse("2006-01-02", to)
+					if err != nil {
+						WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid to date")
+						return
+					}
+					to = day.AddDate(0, 0, 1).Format("2006-01-02") + "T00:00:00"
+				}
+				if from != "" && to != "" && from >= to {
+					WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid transaction date range")
+					return
+				}
+				args = []any{id, id, typeFilter, typeFilter, from, from, to, to}
+			case "reconciliation":
+				date, from, to := get("business_date"), get("from"), get("to")
+				for _, candidate := range []struct{ name, value string }{{"business_date", date}, {"from", from}, {"to", to}} {
+					if candidate.value != "" {
+						if _, err := time.Parse("2006-01-02", candidate.value); err != nil {
+							WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid "+candidate.name+" date")
+							return
+						}
+					}
+				}
+				if date != "" && (from != "" || to != "") || from != "" && to != "" && from > to {
+					WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid reconciliation date range")
+					return
+				}
+				args = []any{date, date, from, from, to, to}
+			}
+		}
+		// The API handlers use the same filters as their corresponding list pages.
+		filtered := false
+		for key, items := range values {
+			if key != "all" && len(items) == 1 && items[0] != "" {
+				filtered = true
+				break
+			}
+		}
+		filename := kind + "-all.csv"
+		if !all && filtered {
+			used := make([]string, 0, len(values))
+			for key := range values {
+				if key != "all" && values.Get(key) != "" {
+					used = append(used, key)
+				}
+			}
+			// Stable parameter order makes downloaded names predictable.
+			order := []string{"q", "department", "account_status", "employee_id", "type", "from", "to", "business_date"}
+			ordered := used[:0]
+			for _, key := range order {
+				for _, candidate := range used {
+					if candidate == key {
+						ordered = append(ordered, key)
+						break
+					}
+				}
+			}
+			if len(ordered) == 0 {
+				filename = kind + "-filtered.csv"
+			} else {
+				filename = kind + "-" + strings.Join(ordered, "-") + ".csv"
+			}
+		}
+		rows, err := db.QueryContext(r.Context(), query, args...)
 		if err != nil {
 			unavailable(w)
 			return
 		}
 		defer rows.Close()
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				unavailable(w)
+				return
+			}
+			w.Header().Set("X-Export-Empty", "true")
+			w.Header().Set("X-Export-Row-Count", "0")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.csv"`, kind))
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+		w.Header().Set("X-Export-Empty", "false")
 		w.Write([]byte{0xef, 0xbb, 0xbf})
 		writer := csv.NewWriter(w)
-		writer.Write(header)
-		for rows.Next() {
+		_ = writer.Write(header)
+		writeCurrent := func() bool {
 			values := make([]any, len(header))
 			dest := make([]any, len(header))
 			for index := range values {
 				dest[index] = &values[index]
 			}
 			if err := rows.Scan(dest...); err != nil {
-				return
+				return false
 			}
 			line := make([]string, len(header))
 			for index, value := range values {
@@ -277,7 +462,24 @@ func adminImportExportRoutes(admin *http.ServeMux, db *sql.DB, employeeService *
 					line[index] = csvSafe(fmt.Sprint(item))
 				}
 			}
-			writer.Write(line)
+			if err := writer.Write(line); err != nil {
+				return false
+			}
+			return true
+		}
+		if !writeCurrent() {
+			unavailable(w)
+			return
+		}
+		for rows.Next() {
+			if !writeCurrent() {
+				unavailable(w)
+				return
+			}
+		}
+		if rows.Err() != nil {
+			unavailable(w)
+			return
 		}
 		writer.Flush()
 	})

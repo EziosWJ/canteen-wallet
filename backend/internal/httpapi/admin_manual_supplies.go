@@ -16,27 +16,86 @@ func manualSupplyRoutes(admin *http.ServeMux, db *sql.DB) {
 	admin.HandleFunc("/api/admin/manual-supplies", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			rows, err := db.QueryContext(r.Context(), `SELECT id,receipt_ref,employee_id,meal_code,business_date,amount_cents,status,note,created_by,COALESCE(resolved_by,0),COALESCE(transaction_id,0),created_at FROM manual_supplies ORDER BY id DESC LIMIT 200`)
+			statuses, valid := manualSupplyStatuses(r.URL.Query()["status"])
+			if !valid {
+				WriteError(w, 400, CodeInvalidRequest, "invalid status filter")
+				return
+			}
+			limit := 50
+			if raw := r.URL.Query().Get("limit"); raw != "" {
+				value, err := strconv.Atoi(raw)
+				if err != nil || value < 1 || value > 200 {
+					WriteError(w, 400, CodeInvalidRequest, "limit must be between 1 and 200")
+					return
+				}
+				limit = value
+			}
+			var cursor int64
+			if raw := r.URL.Query().Get("cursor"); raw != "" {
+				value, err := strconv.ParseInt(raw, 10, 64)
+				if err != nil || value < 1 {
+					WriteError(w, 400, CodeInvalidRequest, "invalid cursor")
+					return
+				}
+				cursor = value
+			}
+
+			query := `SELECT m.id,m.receipt_ref,m.employee_id,m.meal_code,m.business_date,m.amount_cents,m.status,m.note,m.created_by,COALESCE(m.resolved_by,0),COALESCE(m.transaction_id,0),m.created_at,COALESCE(m.resolved_at,''),e.name,e.employee_no,e.department,e.status,a.status,COALESCE(t.created_at,'')
+				FROM manual_supplies m JOIN employees e ON e.id=m.employee_id JOIN accounts a ON a.employee_id=e.id LEFT JOIN transactions t ON t.id=m.transaction_id
+				WHERE m.status IN (?,?,?) AND (?=0 OR m.id<?) ORDER BY m.id DESC LIMIT ?`
+			rows, err := db.QueryContext(r.Context(), query, statuses[0], statuses[1], statuses[2], cursor, cursor, limit+1)
 			if err != nil {
 				unavailable(w)
 				return
 			}
 			defer rows.Close()
-			items := make([]map[string]any, 0)
+			type manualSupplyItem struct {
+				ID                   int64  `json:"id"`
+				ReceiptRef           string `json:"receipt_ref"`
+				EmployeeID           int64  `json:"employee_id"`
+				EmployeeName         string `json:"employee_name"`
+				EmployeeNo           string `json:"employee_no"`
+				Department           string `json:"department"`
+				EmployeeStatus       string `json:"employee_status"`
+				AccountStatus        string `json:"account_status"`
+				MealCode             string `json:"meal_code"`
+				MealName             string `json:"meal_name"`
+				BusinessDate         string `json:"business_date"`
+				AmountCents          int64  `json:"amount_cents"`
+				Status               string `json:"status"`
+				Note                 string `json:"note"`
+				ExceptionReason      string `json:"exception_reason"`
+				CreatedBy            int64  `json:"created_by"`
+				ResolvedBy           int64  `json:"resolved_by"`
+				TransactionID        int64  `json:"transaction_id"`
+				CreatedAt            string `json:"created_at"`
+				ResolvedAt           string `json:"resolved_at"`
+				TransactionCreatedAt string `json:"transaction_created_at"`
+			}
+			items := make([]manualSupplyItem, 0, limit+1)
 			for rows.Next() {
-				var id, employeeID, amount, creator, resolver, transactionID int64
-				var ref, code, date, status, note, created string
-				if err := rows.Scan(&id, &ref, &employeeID, &code, &date, &amount, &status, &note, &creator, &resolver, &transactionID, &created); err != nil {
+				var item manualSupplyItem
+				if err := rows.Scan(&item.ID, &item.ReceiptRef, &item.EmployeeID, &item.MealCode, &item.BusinessDate, &item.AmountCents, &item.Status, &item.Note, &item.CreatedBy, &item.ResolvedBy, &item.TransactionID, &item.CreatedAt, &item.ResolvedAt, &item.EmployeeName, &item.EmployeeNo, &item.Department, &item.EmployeeStatus, &item.AccountStatus, &item.TransactionCreatedAt); err != nil {
 					unavailable(w)
 					return
 				}
-				items = append(items, map[string]any{"id": id, "receipt_ref": ref, "employee_id": employeeID, "meal_code": code, "business_date": date, "amount_cents": amount, "status": status, "note": note, "created_by": creator, "resolved_by": resolver, "transaction_id": transactionID, "created_at": created})
+				item.MealName = manualSupplyMealName(item.MealCode)
+				item.ExceptionReason = manualSupplyExceptionReason(item.Status, item.Note)
+				items = append(items, item)
 			}
 			if rows.Err() != nil {
 				unavailable(w)
 				return
 			}
-			writeJSON(w, 200, map[string]any{"items": items})
+			hasMore := len(items) > limit
+			if hasMore {
+				items = items[:limit]
+			}
+			nextCursor := ""
+			if hasMore {
+				nextCursor = strconv.FormatInt(items[len(items)-1].ID, 10)
+			}
+			writeJSON(w, 200, map[string]any{"items": items, "next_cursor": nextCursor, "has_more": hasMore})
 		case http.MethodPost:
 			var input struct {
 				ReceiptRef   string `json:"receipt_ref"`
@@ -217,6 +276,67 @@ func manualException(w http.ResponseWriter, r *http.Request, tx *sql.Tx, id int6
 		return
 	}
 	writeJSON(w, 409, map[string]any{"id": id, "status": "EXCEPTION", "code": reason})
+}
+
+func manualSupplyStatuses(values []string) ([3]string, bool) {
+	all := [3]string{"PENDING", "POSTED", "EXCEPTION"}
+	if len(values) == 0 || len(values) == 1 && strings.TrimSpace(values[0]) == "" {
+		return [3]string{"PENDING", "EXCEPTION", "PENDING"}, true
+	}
+	selected := make(map[string]bool)
+	for _, value := range values {
+		for _, status := range strings.Split(value, ",") {
+			status = strings.ToUpper(strings.TrimSpace(status))
+			if status == "ALL" {
+				return all, true
+			}
+			if status != "PENDING" && status != "POSTED" && status != "EXCEPTION" {
+				return [3]string{}, false
+			}
+			selected[status] = true
+		}
+	}
+	if len(selected) == 0 || len(selected) > 3 {
+		return [3]string{}, false
+	}
+	result := [3]string{"", "", ""}
+	index := 0
+	for _, status := range []string{"PENDING", "POSTED", "EXCEPTION"} {
+		if selected[status] {
+			result[index] = status
+			index++
+		}
+	}
+	for index < len(result) {
+		result[index] = result[0]
+		index++
+	}
+	return result, true
+}
+
+func manualSupplyMealName(code string) string {
+	switch code {
+	case "BREAKFAST":
+		return "早餐"
+	case "LUNCH":
+		return "午餐"
+	case "DINNER":
+		return "晚餐"
+	default:
+		return code
+	}
+}
+
+func manualSupplyExceptionReason(status, note string) string {
+	if status != "EXCEPTION" {
+		return ""
+	}
+	for _, reason := range []string{"INSUFFICIENT_FUNDS", "ACCOUNT_UNAVAILABLE"} {
+		if strings.Contains(note, reason) {
+			return reason
+		}
+	}
+	return "EXCEPTION"
 }
 
 func validMealCode(code string) bool {

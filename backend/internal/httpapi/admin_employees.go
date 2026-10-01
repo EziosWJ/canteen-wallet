@@ -15,6 +15,20 @@ func adminEmployeeRoutes(admin *http.ServeMux, service *employees.Service) {
 	admin.HandleFunc("/api/admin/employees", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
+			if len(r.URL.Query()) > 0 {
+				input, ok := employeeSearchInput(r)
+				if !ok {
+					WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid employee search")
+					return
+				}
+				page, err := service.Search(r.Context(), input)
+				if err != nil {
+					employeeError(w, err)
+					return
+				}
+				writeJSON(w, http.StatusOK, page)
+				return
+			}
 			items, err := service.List(r.Context())
 			if err != nil {
 				employeeError(w, err)
@@ -57,10 +71,15 @@ func adminEmployeeRoutes(admin *http.ServeMux, service *employees.Service) {
 		}
 		if len(parts) == 1 && r.Method == http.MethodPatch {
 			var input employees.CreateInput
-			if !decodeJSON(w,r,16384,&input) { return }
-			item,err:=service.UpdateProfile(r.Context(),actorID,id,input)
-			if err!=nil { employeeError(w,err);return }
-			writeJSON(w,http.StatusOK,item)
+			if !decodeJSON(w, r, 16384, &input) {
+				return
+			}
+			item, err := service.UpdateProfile(r.Context(), actorID, id, input)
+			if err != nil {
+				employeeError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, item)
 			return
 		}
 		if len(parts) == 2 && parts[1] == "status" && r.Method == http.MethodPatch {
@@ -89,6 +108,28 @@ func adminEmployeeRoutes(admin *http.ServeMux, service *employees.Service) {
 		}
 		notFound(w, r)
 	})
+}
+
+func employeeSearchInput(r *http.Request) (employees.SearchInput, bool) {
+	query := r.URL.Query()
+	allowed := map[string]bool{"q": true, "department": true, "account_status": true, "limit": true, "cursor": true}
+	for key, values := range query {
+		if !allowed[key] || len(values) != 1 {
+			return employees.SearchInput{}, false
+		}
+	}
+	input := employees.SearchInput{
+		Query: query.Get("q"), Department: query.Get("department"),
+		AccountState: query.Get("account_status"), Cursor: query.Get("cursor"), Limit: 50,
+	}
+	if value := query.Get("limit"); value != "" {
+		limit, err := strconv.Atoi(value)
+		if err != nil {
+			return employees.SearchInput{}, false
+		}
+		input.Limit = limit
+	}
+	return input, true
 }
 
 func employeeError(w http.ResponseWriter, err error) {

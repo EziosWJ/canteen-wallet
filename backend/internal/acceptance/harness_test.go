@@ -53,16 +53,17 @@ const (
 )
 
 type env struct {
-	t              *testing.T
-	db             *sql.DB
-	dbPath         string
-	location       *time.Location
-	public         *httptest.Server
-	internal       *httptest.Server
-	internalHandle http.Handler
-	admins         *adminauth.Service
-	adminToken     string
-	lastAdminToken string
+	t                 *testing.T
+	db                *sql.DB
+	dbPath            string
+	backupExternalDir string
+	location          *time.Location
+	public            *httptest.Server
+	internal          *httptest.Server
+	internalHandle    http.Handler
+	admins            *adminauth.Service
+	adminToken        string
+	lastAdminToken    string
 	// adminFactor is the fixture administrator's current authenticator secret,
 	// empty while unbound.
 	adminFactor []byte
@@ -130,7 +131,7 @@ func (e *env) startServers() {
 	terminalService := terminal.New(db, mealService, location, settingsService)
 	tokenService := paymenttokens.New(db, settingsService)
 	rechargeService := recharges.New(db)
-	backupService := &backups.Service{DB: db, DatabasePath: e.dbPath}
+	backupService := &backups.Service{DB: db, DatabasePath: e.dbPath, ExternalDirectory: e.backupExternalDir}
 	e.public = httptest.NewServer(httpapi.Public(db, e.admins, employeeService, mealService,
 		tokenService, terminalService, rechargeService, backupService, settingsService))
 	e.internalHandle = httpapi.Internal(db, terminalService)
