@@ -1549,7 +1549,7 @@ function ImportPanel({ session, onNotice }: { session: AdminSession; onNotice: (
   return <div className="admin-import-flow">
     <section className="import-step">
       <header><div><p className="admin-eyebrow">第一步</p><h3>准备并选择员工表格</h3></div><ExportButton session={session} kind="template" path="/api/admin/imports/template" filename="employee-import-template.xlsx" label="下载 Excel 模板"/></header>
-      <p className="admin-muted import-template">模板列名和顺序为 employee_no、name、phone、department、status。status 可填 ACTIVE 或 FROZEN；此导入只新建员工，不会覆盖已有档案。</p>
+      <p className="admin-muted import-template">请在模板“员工导入”表第 2 行起填写员工编号、姓名、手机号、部门、状态，字段要求见“填写说明”表。前四项必填；状态填“正常”或“冻结”，留空默认为正常。此导入只新建员工，不会覆盖已有档案。</p>
       <div className="import-upload-row"><label className="file-picker">选择 XLSX 文件<input type="file" accept=".xlsx" onChange={event => { setFile(event.target.files?.[0] || null); setPreview(null); setCreated([]); setConfirmed(false); setResultSummary(null); setError(''); onNotice(''); }}/></label><button className="admin-secondary" type="button" disabled={!file || busy} onClick={() => void previewFile()}>{busy && !confirmed ? '正在校验…' : '上传并预览'}</button></div>
     </section>
     {error && <div className="admin-alert error" role="alert">{error}</div>}

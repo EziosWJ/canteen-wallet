@@ -77,8 +77,8 @@ func adminImportExportRoutes(admin *http.ServeMux, db *sql.DB, employeeService *
 			WriteError(w, 400, CodeInvalidRequest, "invalid XLSX workbook")
 			return
 		}
-		if len(matrix) < 2 || len(matrix[0]) < 5 || strings.Join(matrix[0][:5], "|") != "employee_no|name|phone|department|status" {
-			WriteError(w, 400, CodeInvalidRequest, "header must be employee_no,name,phone,department,status")
+		if len(matrix) < 2 || len(matrix[0]) < 5 || (strings.Join(matrix[0][:5], "|") != "employee_no|name|phone|department|status" && strings.Join(matrix[0][:5], "|") != "员工编号|姓名|手机号|部门|状态") {
+			WriteError(w, 400, CodeInvalidRequest, "表头须依次为：员工编号、姓名、手机号、部门、状态（也支持旧英文模板）")
 			return
 		}
 		rows := make([]importRow, 0)
@@ -105,8 +105,11 @@ func adminImportExportRoutes(admin *http.ServeMux, db *sql.DB, employeeService *
 			if item.EmployeeNo == "" && item.Name == "" && item.Phone == "" && item.Department == "" {
 				continue
 			}
-			if item.Status == "" {
+			switch item.Status {
+			case "", "正常":
 				item.Status = "ACTIVE"
+			case "冻结":
+				item.Status = "FROZEN"
 			}
 			rows = append(rows, item)
 			if len(values) < 5 || !employeeNoFormat.MatchString(item.EmployeeNo) || len(item.Name) < 1 || len(item.Name) > 100 || !phoneFormat.MatchString(item.Phone) || len(item.Department) < 1 || len(item.Department) > 100 || (item.Status != "ACTIVE" && item.Status != "FROZEN") {

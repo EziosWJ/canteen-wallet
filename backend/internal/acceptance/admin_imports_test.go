@@ -36,7 +36,7 @@ func TestAdminEmployeeImportTemplateAndMixedRows(t *testing.T) {
 		t.Fatalf("template headers are not an XLSX download: %v", template.headers)
 	}
 	matrix, err := xlsx.ReadFirstSheet(template.body)
-	if err != nil || len(matrix) != 1 || strings.Join(matrix[0][:5], ",") != "employee_no,name,phone,department,status" {
+	if err != nil || len(matrix) != 1 || strings.Join(matrix[0][:5], ",") != "员工编号,姓名,手机号,部门,状态" {
 		t.Fatalf("template columns do not match import order: matrix=%v err=%v", matrix, err)
 	}
 
@@ -78,6 +78,109 @@ func TestAdminEmployeeImportTemplateAndMixedRows(t *testing.T) {
 	errorCSV := e.get(e.public.URL, "/api/admin/imports/"+preview.PreviewID+"/errors", e.adminToken).expect(t, http.StatusOK, nil)
 	if !strings.HasPrefix(errorCSV.header("Content-Type"), "text/csv") || !strings.Contains(string(errorCSV.body), "row,message") || !strings.Contains(string(errorCSV.body), "invalid employee fields") {
 		t.Fatalf("error report is not downloadable with row details: headers=%v body=%s", errorCSV.headers, errorCSV.body)
+	}
+}
+
+// Fill the downloaded template to exercise its headers and ensure the separate
+// instructions sheet does not become employee data.
+func TestAdminEmployeeImportChineseTemplate(t *testing.T) {
+	e := newEnv(t)
+	template := e.get(e.public.URL, "/api/admin/imports/template", e.adminToken).expect(t, http.StatusOK, nil)
+	data := [][]string{
+		{"CN-001", "张三", "13800000801", "财务部", "正常"},
+		{"CN-002", "李四", "13800000802", "财务部", "冻结"},
+		{"0003", "王五", "13800000803", "财务部", ""},
+	}
+	fixtureBytes := employeeWorkbook(t, data)
+	fixture, err := zip.NewReader(bytes.NewReader(fixtureBytes), int64(len(fixtureBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dataRows string
+	for _, file := range fixture.File {
+		if file.Name == "xl/worksheets/sheet1.xml" {
+			r, err := file.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(r)
+			r.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			content := string(body)
+			dataRows = content[strings.Index(content, `<row r="2">`):strings.Index(content, `</sheetData>`)]
+		}
+	}
+	archive, err := zip.NewReader(bytes.NewReader(template.body), int64(len(template.body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var filled bytes.Buffer
+	writer := zip.NewWriter(&filled)
+	foundInstructions := false
+	for _, file := range archive.File {
+		r, err := file.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(r)
+		r.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if file.Name == "xl/worksheets/sheet2.xml" {
+			foundInstructions = true
+			for _, text := range []string{"员工编号", "姓名", "手机号", "部门", "状态", "必填", "留空默认为正常", "前导零"} {
+				if !strings.Contains(string(body), text) {
+					t.Fatalf("instructions missing %q", text)
+				}
+			}
+		}
+		if file.Name == "xl/worksheets/sheet1.xml" {
+			body = []byte(strings.Replace(string(body), "</sheetData>", dataRows+"</sheetData>", 1))
+		}
+		entry, err := writer.Create(file.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !foundInstructions {
+		t.Fatal("template has no instructions sheet")
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	response := uploadEmployeeWorkbookBytes(t, e, filled.Bytes()).expect(t, http.StatusOK, nil)
+	var preview importPreviewResult
+	if err := json.Unmarshal(response.body, &preview); err != nil {
+		t.Fatal(err)
+	}
+	if preview.TotalRows != 3 || preview.ValidRows != 3 || preview.ErrorRows != 0 {
+		t.Fatalf("Chinese template preview: %+v", preview)
+	}
+	confirmed := e.post(e.public.URL, "/api/admin/imports/"+preview.PreviewID+"/confirm", e.adminToken, map[string]any{}).expect(t, http.StatusOK, nil)
+	var outcome struct {
+		Created []struct {
+			Employee struct {
+				EmployeeNo string `json:"employee_no"`
+				Status     string `json:"status"`
+			} `json:"employee"`
+		} `json:"created"`
+	}
+	if err := json.Unmarshal(confirmed.body, &outcome); err != nil {
+		t.Fatal(err)
+	}
+	if len(outcome.Created) != 3 {
+		t.Fatalf("Chinese template confirm: %s", confirmed.body)
+	}
+	for i, want := range []string{"ACTIVE", "FROZEN", "ACTIVE"} {
+		if outcome.Created[i].Employee.Status != want || outcome.Created[i].Employee.EmployeeNo != data[i][0] {
+			t.Fatalf("employee %d: %+v", i, outcome.Created[i])
+		}
 	}
 }
 
