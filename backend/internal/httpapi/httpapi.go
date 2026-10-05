@@ -57,14 +57,15 @@ func Public(db *sql.DB, admins *adminauth.Service, employeeService *employees.Se
 	publicSettingsRoutes(mux, settingsService)
 	publicBootstrapRoutes(mux, bootstrap.New(db, settingsService))
 	employeeRoutes(mux, employeeService, tokenService, terminalService, ledger.New(db), mealService)
+	terminalRoutes(mux, terminalService)
 	mux.HandleFunc("/api", notFound)
 	mux.HandleFunc("/api/", notFound)
 	mux.Handle("/", webassets.Handler())
 	return mux
 }
 
-// Internal is served on a separate listener. Terminal authentication and
-// consumption routes will be added here, never to Public.
+// Internal preserves the original private endpoint for existing terminals.
+// The public listener also serves these routes with the same key authentication.
 func Internal(db *sql.DB, terminalService *terminal.Service) http.Handler {
 	mux := http.NewServeMux()
 	healthRoutes(mux, db)

@@ -39,4 +39,6 @@ Vite 将 `/api` 代理到 `127.0.0.1:8080`；`CANTEEN_WEB_API_TARGET` 可改代�
 
 员工通过 `POST /api/auth/login` 登录，首次使用临时密码必须通过 `POST /api/me/change-password` 修改。`GET /api/me`、`GET /api/me/account`、`GET /api/me/transactions`、`GET /api/me/meal-periods`、`POST /api/me/payment-token` 和 `POST /api/auth/logout` 均需员工 Bearer 会话。本人流水按 `?cursor=<上页 next_cursor>&limit=20` 游标分页，返回 `items` 和 `next_cursor`；新设备登录撤销旧会话。动态就餐码约每 30 秒允许刷新一次，提前请求返回 429 和下次可刷新时间；目前仍需后续消费链路才能完成扫码扣款。
 
-`GET /api/admin/meal-periods` 和 `PUT /api/admin/meal-periods/{code}` 用于配置三餐时段及固定餐费。扫码终端通过 `canteen-server provision-terminal <id> <name>` 取得独立凭据；内部 `/api/v1/terminal/scan`、`confirm`、`heartbeat` 和 `events` 均需该凭据。`canteen-scan-sim` 可提交真实员工 Token 并模拟断网；Linux Scan Agent 直接读 USB 输入设备，向本地终端屏提供 `/api/display/state`。管理员新增退款、流水查询、终端状态、扫码事件、XLSX 人员预览和确认、CSV 导出、日结、收款复核、故障供餐补录与备份入口。Linux 现场安装、外部备份和恢复步骤见 [deploy/README.md](./deploy/README.md)。当前阶段只要求前后端编译；浏览器和现场业务流程由用户人工测试。
+`GET /api/admin/meal-periods` 和 `PUT /api/admin/meal-periods/{code}` 用于配置三餐时段及固定餐费。扫码终端在后台创建并管理独立 key，CLI `canteen-server provision-terminal <id> <name>` 保留为备用；公开与内部 `/api/v1/terminal/*` 接口均需该凭据，终端无员工确认扣款权限。`canteen-scan-sim` 可提交真实员工 Token 并模拟断网；Linux Scan Agent 直接读 USB 输入设备，向本地终端屏提供 `/api/display/state`。管理员新增退款、流水查询、终端状态、扫码事件、XLSX 人员预览和确认、CSV 导出、日结、收款复核、故障供餐补录与备份入口。Linux 现场安装、外部备份和恢复步骤见 [deploy/README.md](./deploy/README.md)。当前阶段只要求前后端编译；浏览器和现场业务流程由用户人工测试。
+
+扫码终端部署与接入：见 [Linux Agent 最简启动](deploy/scan-agent.md) 和 [跨平台终端 API](docs/terminal-api.md)。

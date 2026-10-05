@@ -247,3 +247,6 @@
   .manual-records>header,.import-error-report>header,.daily-result-head{align-items:flex-start;flex-direction:column}
   .receipt-review-detail,.manual-registration,.manual-records,.manual-post-confirm,.record-candidates,.record-confirmation,.transaction-detail{padding:13px}
 }
+.admin-form.terminal-create { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+.terminal-create label { flex: 1; min-width: 180px; }
+.terminal-id { display: block; color: var(--muted, #64748b); overflow-wrap: anywhere; }

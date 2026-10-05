@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import QRCode from 'qrcode';
-import { adminApi, AdminApiError, readAdminSession, saveAdminSession, type AdminAccount, type AdminEmployee, type AdminMeal, type AdminSession, type AdminTransaction, type ConsumptionModes, type SecondFactorEnrollment, type SecurityState } from './adminApi';
+import { adminApi, AdminApiError, readAdminSession, saveAdminSession, type AdminAccount, type AdminEmployee, type AdminMeal, type AdminSession, type AdminTransaction, type AdminTerminal, type ConsumptionModes, type SecondFactorEnrollment, type SecurityState } from './adminApi';
 import './admin.css';
 
 type Section = 'employees' | 'withdrawals' | 'imports' | 'ledger' | 'refunds' | 'reversals' | 'meals' | 'daily' | 'receipts' | 'manual-supply' | 'backups' | 'exports' | 'modes' | 'terminals' | 'security' | 'audit' | 'not-found';
@@ -379,10 +379,10 @@ function AdminConsole({ session, onSession, initialState, onInitialStateConsumed
         const [state, people] = await Promise.all([adminApi.security(session), adminApi.administrators(session)]);
         setSecurity(state); setAccounts(people.administrators || []); data = state;
       }
+      else if (section === 'terminals') { data = await adminApi.terminals(session); }
       else if (section === 'modes') { const response = await adminApi.adminConsumptionModes(session); setModes(response); data = response; }
       else {
         const paths: Partial<Record<Section, string>> = {
-          terminals: '/api/admin/terminals',
           daily: `/api/admin/reconciliation/daily?business_date=${encodeURIComponent(businessDate)}`,
           audit: '/api/admin/audit-events',
         };
@@ -468,7 +468,7 @@ function AdminConsole({ session, onSession, initialState, onInitialStateConsumed
           <SelfSecurityPanel session={session} security={security} busy={busy} onNotice={setNotice} onExpired={expire}/>
           <AdministratorPanel session={session} me={me} accounts={accounts} busy={busy} onNotice={setNotice} onChanged={() => void load()}/>
         </>}
-        {section === 'terminals' && <><Panel title="终端状态" description="设备心跳、扫码枪和服务状态由终端服务提供。">{state.busy ? <Loading/> : state.error ? <ErrorBox retry={() => void load()}>{state.error}</ErrorBox> : <Table rows={rowsFrom(state.data)}/>}</Panel><Panel title="扫码事件" description="仅展示脱敏事件摘要，不显示原始 Token。"><RemoteTable session={session} path="/api/admin/scan-events"/></Panel></>}
+        {section === 'terminals' && <><TerminalManager session={session} items={(state.data as { items: AdminTerminal[] } | null)?.items || []} loading={state.busy} loadError={state.error} reload={() => void load()} onUnauthorized={expire}/><Panel title="扫码事件" description="仅展示脱敏事件摘要，不显示原始 Token。"><RemoteTable session={session} path="/api/admin/scan-events"/></Panel></>}
         {section === 'daily' && <DailyReconciliation date={businessDate} records={rowsFrom(state.data)} loading={state.busy} error={state.error} busy={busy} onDate={setBusinessDate} onRetry={() => void load()} exportButton={<ExportButton session={session} kind="reconciliation" filters={{ business_date: businessDate }} label={`导出 ${businessDate} 日结`}/>} onGenerate={() => {
           const existing = rowsFrom(state.data).find(item => item.business_date === businessDate);
           if (existing && !window.confirm(`${businessDate} 已有日结结果。重新生成会更新这一天的核对结果，是否继续？`)) return;
@@ -495,6 +495,110 @@ function AdminConsole({ session, onSession, initialState, onInitialStateConsumed
       onResetPassword={() => { setShowOperations(null); void runAction(async () => { const value = await adminApi.resetEmployeePassword(session, showOperations.id); window.prompt('请安全交付临时密码', value.temporary_password); }, '已重置临时密码。'); }}/>}
     {showAdjustment && <AdjustmentModal session={session} employee={showAdjustment} busy={busy} onNotice={setNotice} onClose={() => setShowAdjustment(null)} onDone={() => { setShowAdjustment(null); void load(); }}/>}
   </div>;
+}
+
+function TerminalManager({ session, items, loading, loadError, reload, onUnauthorized }: {
+  session: AdminSession; items: AdminTerminal[]; loading: boolean; loadError: string; reload: () => void; onUnauthorized: () => void;
+}) {
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [selected, setSelected] = useState<AdminTerminal | null>(null);
+  async function create(event: FormEvent) {
+    event.preventDefault(); setError(''); setNotice('');
+    if (new TextEncoder().encode(name.trim()).length > 100) { setError('终端名称不能超过 100 字节。'); return; }
+    setBusy(true);
+    try {
+      const item = await adminApi.createTerminal(session, name.trim());
+      setName(''); setNotice('终端已创建。请查看 key 或下载配置。'); setSelected(item); reload();
+    } catch (reason) {
+      if (reason instanceof AdminApiError && reason.status === 401) onUnauthorized();
+      else setError(message(reason));
+    } finally { setBusy(false); }
+  }
+  const deviceStatus = (value: string) => ({ READY: '就绪', OFFLINE: '离线', UNKNOWN: '未报告', UNAVAILABLE: '未配置', FAILED: '异常' }[value] || value);
+  return <Panel title="扫码终端" description="创建扫码点位并管理其 key。更换扫码枪时可继续使用原终端。">
+    <form className="admin-form terminal-create" onSubmit={event => void create(event)}>
+      <label>终端名称<input required maxLength={100} value={name} onChange={event => setName(event.target.value)} placeholder="例如：食堂一号终端"/></label>
+      <button className="admin-primary" disabled={busy || loading}>{busy ? '正在创建…' : '创建终端'}</button>
+    </form>
+    {error && <ErrorBox>{error}</ErrorBox>}{notice && <p role="status">{notice}</p>}
+    {loading ? <Loading/> : loadError ? <ErrorBox retry={reload}>{loadError}</ErrorBox> : items.length ? <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>终端</th><th>状态</th><th>最近心跳</th><th>扫码枪</th><th>语音</th><th>服务</th><th>操作</th></tr></thead><tbody>{items.map(item => <tr key={item.id}>
+      <td><b>{item.name}</b><small className="terminal-id">{item.id}</small></td>
+      <td><span className={`admin-status ${item.enabled ? 'ok' : 'warn'}`}>{item.enabled ? '启用' : '停用'}</span></td>
+      <td>{item.last_seen_at ? new Date(item.last_seen_at).toLocaleString('zh-CN', { hour12: false }) : '未报告心跳'}</td>
+      <td>{deviceStatus(item.scanner_status)}</td><td>{deviceStatus(item.voice_status)}</td><td>{deviceStatus(item.database_status)}</td>
+      <td><button className="admin-link" type="button" onClick={() => { setNotice(''); setSelected(item); }}>管理</button></td>
+    </tr>)}</tbody></table></div> : <div className="admin-empty">还没有扫码终端。填写名称即可创建。</div>}
+    {selected && <TerminalSettings key={selected.id} session={session} terminal={selected} onClose={() => setSelected(null)} onUnauthorized={onUnauthorized} onChanged={item => { setSelected(item); reload(); }}/>}
+  </Panel>;
+}
+
+function TerminalSettings({ session, terminal, onClose, onChanged, onUnauthorized }: {
+  session: AdminSession; terminal: AdminTerminal; onClose: () => void; onChanged: (item: AdminTerminal) => void; onUnauthorized: () => void;
+}) {
+  const [name, setName] = useState(terminal.name);
+  const [serverURL, setServerURL] = useState(window.location.origin);
+  const [key, setKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  async function perform(action: () => Promise<void>) {
+    setBusy(true); setError(''); setNotice('');
+    try { await action(); }
+    catch (reason) {
+      if (reason instanceof AdminApiError && reason.status === 401) onUnauthorized();
+      else setError(message(reason));
+    } finally { setBusy(false); }
+  }
+  async function reveal(copy: boolean) {
+    const value = (await adminApi.terminalKey(session, terminal.id)).key;
+    setKey(value);
+    if (copy) {
+      if (navigator.clipboard) { try { await navigator.clipboard.writeText(value); setNotice('key 已复制。'); return; } catch { /* HTTP pages may not permit clipboard access. */ } }
+      setNotice('浏览器未允许自动复制，请选中下方 key 手动复制。');
+    }
+  }
+  async function download() {
+    const file = await adminApi.terminalConfig(session, terminal.id, serverURL);
+    const url = URL.createObjectURL(file);
+    const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'terminal.env'; anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setNotice('配置已下载，请填写扫码设备路径后启动 Agent。');
+  }
+  return <Modal title={`管理扫码终端 · ${terminal.name}`} onClose={() => { if (!busy) onClose(); }}>
+    <div className="admin-form">
+      <p className="admin-muted">编号：{terminal.id} · {terminal.enabled ? '启用' : '停用'}</p>
+      {error && <ErrorBox>{error}</ErrorBox>}{notice && <p role="status">{notice}</p>}
+      <form className="admin-form" onSubmit={event => { event.preventDefault(); void perform(async () => {
+        await adminApi.updateTerminal(session, terminal.id, { name: name.trim() }); onChanged({ ...terminal, name: name.trim() }); setNotice('名称已保存。');
+      }); }}>
+        <label>终端名称<input required maxLength={100} disabled={busy} value={name} onChange={event => setName(event.target.value)}/></label>
+        <button className="admin-secondary" disabled={busy || name.trim() === terminal.name}>保存名称</button>
+      </form>
+      <label>终端 key<input readOnly type={key ? 'text' : 'password'} value={key || '••••••••••••••••'} onFocus={event => { if (key) event.target.select(); }}/></label>
+      {!terminal.credential_available && <p className="admin-muted">此终端的原 key 无法取回。可继续使用原凭据文件，或重置 key 后重新配置。</p>}
+      <div className="admin-form-actions">
+        <button className="admin-secondary" type="button" disabled={busy || !terminal.credential_available} onClick={() => void perform(() => reveal(false))}>查看 key</button>
+        <button className="admin-secondary" type="button" disabled={busy || !terminal.credential_available} onClick={() => void perform(() => reveal(true))}>复制 key</button>
+        {key && <button className="admin-secondary" type="button" disabled={busy} onClick={() => setKey('')}>隐藏 key</button>}
+      </div>
+      <label>服务端地址<input type="url" disabled={busy} value={serverURL} onChange={event => setServerURL(event.target.value)} placeholder="http://服务器:端口"/></label>
+      <button className="admin-secondary" type="button" disabled={busy || !terminal.credential_available || !serverURL} onClick={() => void perform(download)}>下载配置</button>
+      <div className="admin-form-actions">
+        <button className="admin-secondary" type="button" disabled={busy} onClick={() => {
+          if (!window.confirm('重置后旧 key 立即失效。需要更新 Agent 配置并重启，确定重置吗？')) return;
+          setKey(''); void perform(async () => { await adminApi.resetTerminalKey(session, terminal.id); onChanged({ ...terminal, credential_available: true }); setNotice('key 已重置。请复制新 key 或下载配置，更新 Agent 后重启。'); });
+        }}>重置 key</button>
+        <button className="admin-secondary" type="button" disabled={busy} onClick={() => {
+          if (terminal.enabled && !window.confirm('停用后该终端无法扫码或查询结果，历史记录会保留。确定停用吗？')) return;
+          void perform(async () => { await adminApi.updateTerminal(session, terminal.id, { enabled: !terminal.enabled }); onChanged({ ...terminal, enabled: !terminal.enabled }); setNotice(terminal.enabled ? '终端已停用。' : '终端已启用。'); });
+        }}>{terminal.enabled ? '停用终端' : '启用终端'}</button>
+        <button className="admin-secondary" type="button" disabled={busy} onClick={onClose}>关闭</button>
+      </div>
+    </div>
+  </Modal>;
 }
 
 function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {

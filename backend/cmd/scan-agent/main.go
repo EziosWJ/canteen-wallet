@@ -72,35 +72,18 @@ func main() {
 }
 
 func run(logger *slog.Logger) error {
-	device := os.Getenv("CANTEEN_SCANNER_DEVICE")
-	if device == "" {
-		return errors.New("CANTEEN_SCANNER_DEVICE is required")
-	}
-	credentialPath := os.Getenv("CANTEEN_TERMINAL_CREDENTIAL_FILE")
-	if credentialPath == "" {
-		return errors.New("CANTEEN_TERMINAL_CREDENTIAL_FILE is required")
-	}
-	secret, err := os.ReadFile(credentialPath)
+	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	credential := strings.TrimSpace(string(secret))
-	if !strings.HasPrefix(credential, "trm_") {
-		return errors.New("invalid credential file")
-	}
-	internal := env("CANTEEN_INTERNAL_URL", "http://127.0.0.1:8081")
-	public := env("CANTEEN_PUBLIC_URL", "http://127.0.0.1:5001")
-	publicURL, err := url.Parse(public)
-	if err != nil {
-		return err
-	}
-	a := &agent{client: &http.Client{Timeout: 4 * time.Second}, internal: strings.TrimRight(internal, "/"), credential: credential, voiceCommand: os.Getenv("CANTEEN_TTS_COMMAND"), logger: logger, watching: make(map[string]bool), state: displayState{Status: "WAITING", ScannerStatus: "OFFLINE", DatabaseStatus: "UNKNOWN", VoiceStatus: "UNAVAILABLE", Events: make([]event, 0)}}
+	publicURL, _ := url.Parse(cfg.public) // Validated by loadConfig.
+	a := &agent{client: &http.Client{Timeout: 4 * time.Second}, internal: cfg.internal, credential: cfg.credential, voiceCommand: os.Getenv("CANTEEN_TTS_COMMAND"), logger: logger, watching: make(map[string]bool), state: displayState{Status: "WAITING", ScannerStatus: "OFFLINE", DatabaseStatus: "UNKNOWN", VoiceStatus: "UNAVAILABLE", Events: make([]event, 0)}}
 	if a.voiceCommand != "" {
 		a.state.VoiceStatus = "READY"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go a.readScanner(ctx, device)
+	go a.readScanner(ctx, cfg.device)
 	go a.heartbeat(ctx)
 	go a.resumePending(ctx)
 	proxy := httputil.NewSingleHostReverseProxy(publicURL)
@@ -125,7 +108,7 @@ func run(logger *slog.Logger) error {
 		proxy.ServeHTTP(w, r)
 	})
 	server := &http.Server{Addr: env("CANTEEN_DISPLAY_ADDR", "127.0.0.1:8090"), Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	logger.Info("scan agent started", "display_addr", server.Addr, "scanner_device", device)
+	logger.Info("scan agent started", "display_addr", server.Addr, "scanner_device", cfg.device)
 	return server.ListenAndServe()
 }
 

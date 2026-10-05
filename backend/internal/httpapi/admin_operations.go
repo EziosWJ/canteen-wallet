@@ -153,33 +153,7 @@ func adminOperationRoutes(admin *http.ServeMux, db *sql.DB) {
 		}
 		writeJSON(w, status, map[string]any{"transaction": fundTransactionJSON(result.Entry), "replayed": result.Replayed})
 	})
-	admin.HandleFunc("/api/admin/terminals", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			methodGet(w)
-			return
-		}
-		rows, err := db.QueryContext(r.Context(), `SELECT id,name,enabled,COALESCE(last_seen_at,''),scanner_status,voice_status,database_status FROM terminals ORDER BY id`)
-		if err != nil {
-			unavailable(w)
-			return
-		}
-		defer rows.Close()
-		items := make([]map[string]any, 0)
-		for rows.Next() {
-			var id, name, last, scanner, voice, database string
-			var enabled int
-			if err := rows.Scan(&id, &name, &enabled, &last, &scanner, &voice, &database); err != nil {
-				unavailable(w)
-				return
-			}
-			items = append(items, map[string]any{"id": id, "name": name, "enabled": enabled == 1, "last_seen_at": last, "scanner_status": scanner, "voice_status": voice, "database_status": database})
-		}
-		if rows.Err() != nil {
-			unavailable(w)
-			return
-		}
-		writeJSON(w, 200, map[string]any{"items": items})
-	})
+	adminTerminalRoutes(admin, db)
 	admin.HandleFunc("/api/admin/scan-events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			methodGet(w)

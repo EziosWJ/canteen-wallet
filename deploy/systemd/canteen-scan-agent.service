@@ -1,7 +1,7 @@
 [Unit]
 Description=Canteen Wallet USB Scan Agent
-After=canteen-server.service
-Requires=canteen-server.service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple

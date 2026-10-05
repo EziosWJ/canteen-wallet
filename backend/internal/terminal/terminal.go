@@ -88,17 +88,25 @@ type scanContext struct {
 }
 
 func Provision(ctx context.Context, db *sql.DB, id, name string) (string, error) {
-	if len(id) < 1 || len(id) > 64 || strings.TrimSpace(id) != id || len(name) < 1 || len(name) > 100 {
+	if len(id) < 1 || len(id) > 64 || strings.TrimSpace(id) != id || !validName(name) {
 		return "", ErrInvalidRequest
 	}
+	credential, hash, err := newCredential()
+	if err != nil {
+		return "", err
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO terminals(id, credential_hash, credential, name, created_at) VALUES (?, ?, ?, ?, ?)`, id, hash, credential, name, time.Now().UTC().Format(time.RFC3339Nano))
+	return credential, err
+}
+
+func newCredential() (string, []byte, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	credential := "trm_" + base64.RawURLEncoding.EncodeToString(raw)
 	hash := sha256.Sum256([]byte(credential))
-	_, err := db.ExecContext(ctx, `INSERT INTO terminals(id, credential_hash, name, created_at) VALUES (?, ?, ?, ?)`, id, hash[:], name, time.Now().UTC().Format(time.RFC3339Nano))
-	return credential, err
+	return credential, hash[:], nil
 }
 
 func (s *Service) Authenticate(ctx context.Context, credential string) (string, error) {

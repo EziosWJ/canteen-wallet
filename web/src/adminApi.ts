@@ -170,6 +170,24 @@ async function request<T>(path: string, session: AdminSession | null, options: R
 }
 
 export const adminApi = {
+  terminals(session: AdminSession) {
+    return request<{ items: AdminTerminal[] }>('/api/admin/terminals', session);
+  },
+  createTerminal(session: AdminSession, name: string) {
+    return request<AdminTerminal>('/api/admin/terminals', session, { method: 'POST', body: JSON.stringify({ name }) });
+  },
+  updateTerminal(session: AdminSession, id: string, input: { name?: string; enabled?: boolean }) {
+    return request<void>(`/api/admin/terminals/${encodeURIComponent(id)}`, session, { method: 'PATCH', body: JSON.stringify(input) });
+  },
+  terminalKey(session: AdminSession, id: string) {
+    return request<{ key: string }>(`/api/admin/terminals/${encodeURIComponent(id)}/credential`, session);
+  },
+  resetTerminalKey(session: AdminSession, id: string) {
+    return request<{ key: string }>(`/api/admin/terminals/${encodeURIComponent(id)}/reset-key`, session, { method: 'POST' });
+  },
+  terminalConfig(session: AdminSession, id: string, serverURL: string) {
+    return request<Blob>(`/api/admin/terminals/${encodeURIComponent(id)}/config?${new URLSearchParams({ server_url: serverURL })}`, session);
+  },
   login(username: string, password: string, secondFactorCode: string) {
     return request<AdminSession>('/api/admin/login', null, { method: 'POST', body: JSON.stringify({ username, password, second_factor_code: secondFactorCode }) });
   },
@@ -287,4 +305,15 @@ export const adminApi = {
   },
 
   generic<T>(session: AdminSession, path: string, options: RequestInit = {}) { return request<T>(path, session, options); },
+};
+
+export type AdminTerminal = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  credential_available: boolean;
+  last_seen_at: string;
+  scanner_status: string;
+  voice_status: string;
+  database_status: string;
 };
