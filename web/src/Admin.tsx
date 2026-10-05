@@ -627,7 +627,7 @@ function RechargeModal({ employee, onClose, onSave }: { employee: AdminEmployee;
     <p className="admin-muted">当前余额 {yuan(employee.balance)}。请先确认已实际收款，并填写唯一凭据。</p>
     <label>充值金额（元）<input type="number" min="0.01" step="0.01" required value={amount} onChange={e => setAmount(e.target.value)}/></label>
     <label>收款凭据编号<input required value={receipt} onChange={e => setReceipt(e.target.value)} maxLength={120}/></label>
-    <label>收款方式<select value={method} onChange={e => setMethod(e.target.value)}><option value="CASH">现金</option><option value="BANK_TRANSFER">银行转账</option><option value="OTHER">其他线下方式</option></select></label>
+    <label>收款方式<select value={method} onChange={e => setMethod(e.target.value)}><option value="CASH">现金</option><option value="BANK_TRANSFER">银行转账</option><option value="WECHAT">微信</option><option value="ALIPAY">支付宝</option><option value="OTHER">其他线下方式</option></select></label>
     <div className="admin-form-actions"><button className="admin-secondary" type="button" onClick={onClose}>取消</button><button className="admin-primary">确认已收款并登记</button></div>
   </form></Modal>;
 }
@@ -1412,7 +1412,7 @@ function reviewStatusLabel(status: string): string {
   return status === 'PENDING' ? '待复核' : status === 'MATCHED' ? '凭据匹配' : status === 'DIFFERENCE' ? '存在差异' : status === 'RESOLVED' ? '差异已处理' : status;
 }
 function paymentMethodLabel(method: string): string {
-  return method === 'CASH' ? '现金' : method === 'BANK_TRANSFER' ? '银行转账' : method === 'OTHER' ? '其他线下方式' : method || '—';
+  return method === 'CASH' ? '现金' : method === 'BANK_TRANSFER' ? '银行转账' : method === 'WECHAT' ? '微信' : method === 'ALIPAY' ? '支付宝' : method === 'OTHER' ? '其他线下方式' : method || '—';
 }
 
 type ManualSupplyItem = {

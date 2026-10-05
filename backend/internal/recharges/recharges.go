@@ -69,7 +69,7 @@ func (s *Service) Confirm(ctx context.Context, actorID int64, input ConfirmInput
 	input.ReceiptRef = strings.TrimSpace(input.ReceiptRef)
 	if actorID < 1 || input.EmployeeID < 1 || input.AmountCents < 1 || input.CollectedAt.IsZero() ||
 		!validText(input.ReceiptRef, 128) || !validText(input.IdempotencyKey, 128) ||
-		(input.PaymentMethod != "CASH" && input.PaymentMethod != "BANK_TRANSFER" && input.PaymentMethod != "OTHER") {
+		!validPaymentMethod(input.PaymentMethod) {
 		return ConfirmResult{}, ErrInvalidInput
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -240,4 +240,13 @@ func findReceipt(ctx context.Context, tx *sql.Tx, transactionID int64) (Receipt,
 
 func validText(value string, max int) bool {
 	return len(value) <= max && strings.TrimSpace(value) != ""
+}
+
+func validPaymentMethod(method string) bool {
+	switch method {
+	case "CASH", "BANK_TRANSFER", "WECHAT", "ALIPAY", "OTHER":
+		return true
+	default:
+		return false
+	}
 }
