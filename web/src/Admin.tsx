@@ -279,6 +279,7 @@ function AdminConsole({ session, onSession, initialState, onInitialStateConsumed
   // opened for, so the mount key is per account and the adjustment cannot be
   // redirected to someone else mid-flight.
   const [showAdjustment, setShowAdjustment] = useState<AdminEmployee | null>(null);
+  const [showPasswordReset, setShowPasswordReset] = useState<AdminEmployee | null>(null);
   const [businessDate, setBusinessDate] = useState(businessToday());
   const [mealDraft, setMealDraft] = useState<MealDraft[] | null>(null);
   const loadRequest = useRef(0);
@@ -475,7 +476,7 @@ function AdminConsole({ session, onSession, initialState, onInitialStateConsumed
           void runAction(() => adminApi.generic(session, '/api/admin/reconciliation/daily', { method: 'POST', body: JSON.stringify({ business_date: businessDate }) }), existing ? `已更新 ${businessDate} 日结。` : `已生成 ${businessDate} 日结。`);
         }}/>}
         {section === 'receipts' && <ReceiptReviews session={session} onNotice={setNotice}/>}
-        {section === 'manual-supply' && <Panel title="故障供餐登记与补录" description="先登记供餐事实；核对并补录后才扣款。记录按实际入账时间进入日结。"><ManualSupply session={session} onNotice={setNotice}/></Panel>}
+        {section === 'manual-supply' && <Panel title="故障供餐登记与补录" description="先登记供餐事实；核对并补录后才扣款。记录按实际入账时间进入日结。"><ManualSupply session={session}/></Panel>}
         {section === 'backups' && <BackupManager session={session}/>}
         {section === 'exports' && <Panel title="全量数据导出" description="按需导出全部匹配数据，不受当前页面筛选或已加载行数影响。若只需当前筛选范围，请在员工、资金流水或日结页面使用对应导出入口。"><div className="export-grid">{[
           ['employees', '全部员工档案'], ['balances', '全部账户余额'], ['transactions', '全部资金流水'], ['reconciliation', '全部日结记录'],
@@ -492,8 +493,9 @@ function AdminConsole({ session, onSession, initialState, onInitialStateConsumed
       onAdjust={() => { setShowAdjustment(showOperations); setShowOperations(null); }}
       onWithdrawal={() => goToEmployeeOperation('withdrawals', showOperations.id)}
       onFreeze={() => { setShowOperations(null); void runAction(() => adminApi.setEmployeeStatus(session, showOperations.id, showOperations.status === 'ACTIVE' ? 'FROZEN' : 'ACTIVE'), '员工状态已更新。'); }}
-      onResetPassword={() => { setShowOperations(null); void runAction(async () => { const value = await adminApi.resetEmployeePassword(session, showOperations.id); window.prompt('请安全交付临时密码', value.temporary_password); }, '已重置临时密码。'); }}/>}
+      onResetPassword={() => { setShowPasswordReset(showOperations); setShowOperations(null); }}/>}
     {showAdjustment && <AdjustmentModal session={session} employee={showAdjustment} busy={busy} onNotice={setNotice} onClose={() => setShowAdjustment(null)} onDone={() => { setShowAdjustment(null); void load(); }}/>}
+    {showPasswordReset && <ResetEmployeePasswordModal key={showPasswordReset.id} session={session} employee={showPasswordReset} onClose={() => { setShowPasswordReset(null); void load(); }}/>}
   </div>;
 }
 
@@ -601,8 +603,8 @@ function TerminalSettings({ session, terminal, onClose, onChanged, onUnauthorize
   </Modal>;
 }
 
-function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
-  return <div className="admin-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><section className="admin-modal" role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button type="button" aria-label="关闭" onClick={onClose}>×</button></header>{children}</section></div>;
+function Modal({ title, children, onClose, className = '' }: { title: string; children: ReactNode; onClose: () => void; className?: string }) {
+  return <div className="admin-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><section className={`admin-modal ${className}`} role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button type="button" aria-label="关闭" onClick={onClose}>×</button></header>{children}</section></div>;
 }
 
 function CreateEmployee({ onClose, onSave }: { onClose: () => void; onSave: (input: Pick<AdminEmployee, 'employee_no' | 'name' | 'phone' | 'department'>) => void }) {
@@ -668,9 +670,58 @@ function AccountOperations({ employee, onClose, onEdit, onRecharge, onAdjust, on
       {action('余额调整', '按审批原因增减余额', onAdjust)}
       {action(closed ? '退还余额' : '退还并关户', closed ? '从未发放的退款记录中单选一笔发放' : '线下退还全部余额并关闭账户（不可逆）', onWithdrawal, false)}
       {employee.status === 'ACTIVE' || employee.status === 'FROZEN' ? action(employee.status === 'ACTIVE' ? '冻结账户' : '解冻账户', employee.status === 'ACTIVE' ? '暂停该员工的消费与登录' : '恢复正常消费与登录', onFreeze) : null}
-      {action('重置密码', '生成临时密码并交付员工', onResetPassword)}
+      {action('重置密码', '手动指定密码或生成 6 位数字密码', onResetPassword)}
     </div>
     <div className="admin-form-actions"><button className="admin-secondary" type="button" onClick={onClose}>关闭面板</button></div>
+  </Modal>;
+}
+
+function ResetEmployeePasswordModal({ session, employee, onClose }: { session: AdminSession; employee: AdminEmployee; onClose: () => void }) {
+  const [method, setMethod] = useState<'generated' | 'manual'>('generated');
+  const [password, setPassword] = useState(''); const [confirm, setConfirm] = useState('');
+  const [issuedPassword, setIssuedPassword] = useState(''); const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(''); const [copied, setCopied] = useState(false);
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setError('');
+    if (method === 'manual') {
+      if ([...password].length < 6) { setError('密码至少需要 6 位，不限制字符类型。'); return; }
+      if (new TextEncoder().encode(password).length > 1024) { setError('密码不能超过 1024 字节。'); return; }
+      if (password !== confirm) { setError('两次输入的密码不一致。'); return; }
+    }
+    setBusy(true);
+    try {
+      const result = await adminApi.resetEmployeePassword(session, employee.id, method === 'manual' ? password : undefined);
+      setIssuedPassword(result.temporary_password);
+    } catch (reason) { setError(message(reason)); }
+    finally { setBusy(false); }
+  }
+  async function copyPassword() {
+    try {
+      await navigator.clipboard.writeText(issuedPassword);
+      setCopied(true);
+    } catch { setCopied(false); }
+  }
+  return <Modal title={issuedPassword ? '密码已重置' : `重置密码 · ${employee.name}`} onClose={() => { if (!busy) onClose(); }} className="employee-password-modal">
+    {issuedPassword ? <>
+      <div className="admin-alert success" role="status">员工下次登录时需要修改密码。请通过安全渠道交付此密码。</div>
+      <label className="issued-password-label">临时密码<input type="text" readOnly value={issuedPassword} onFocus={event => event.currentTarget.select()}/></label>
+      <div className="admin-form-actions"><button className="admin-secondary" type="button" onClick={() => void copyPassword()}>{copied ? '已复制' : '复制密码'}</button><button className="admin-primary" type="button" onClick={onClose}>完成</button></div>
+      {!copied && <p className="admin-muted">如果无法复制，可选中密码后手动复制。</p>}
+    </> : <>
+      <p className="admin-muted password-reset-hint">手动密码至少 6 位，可使用数字、字母或其他字符。系统生成的密码为 6 位数字。</p>
+      <form className="admin-form" onSubmit={submit}>
+        <fieldset className="password-reset-method"><legend>选择密码方式</legend>
+          <label><input type="radio" name="password-method" checked={method === 'generated'} onChange={() => setMethod('generated')}/><span><strong>系统生成</strong><small>自动生成 6 位数字密码</small></span></label>
+          <label><input type="radio" name="password-method" checked={method === 'manual'} onChange={() => setMethod('manual')}/><span><strong>手动指定</strong><small>设置员工下次登录使用的密码</small></span></label>
+        </fieldset>
+        {method === 'manual' && <>
+          <label>新密码<input type="password" autoComplete="new-password" minLength={6} maxLength={1024} value={password} onChange={event => setPassword(event.target.value)}/></label>
+          <label>确认新密码<input type="password" autoComplete="new-password" minLength={6} maxLength={1024} value={confirm} onChange={event => setConfirm(event.target.value)}/></label>
+        </>}
+        {error && <div className="admin-alert error" role="alert">{error}</div>}
+        <div className="admin-form-actions"><button className="admin-secondary" type="button" disabled={busy} onClick={onClose}>取消</button><button className="admin-primary" disabled={busy}>{busy ? '正在重置…' : '重置密码'}</button></div>
+      </form>
+    </>}
   </Modal>;
 }
 
@@ -1422,12 +1473,14 @@ type ManualSupplyItem = {
   transaction_id: number; created_at: string; resolved_at: string; transaction_created_at: string;
 };
 
-function ManualSupply({ session, onNotice }: { session: AdminSession; onNotice: (value: string) => void }) {
+function ManualSupply({ session }: { session: AdminSession }) {
   const [form, setForm] = useState({ meal_code: '', amount: '', receipt_ref: '', business_date: businessToday(), note: '' });
   const [employee, setEmployee] = useState<AdminEmployee | null>(null); const [meals, setMeals] = useState<AdminMeal[]>([]);
   const [items, setItems] = useState<ManualSupplyItem[]>([]); const [cursor, setCursor] = useState('');
-  const [filter, setFilter] = useState('PENDING,EXCEPTION'); const [loading, setLoading] = useState(true); const [listError, setListError] = useState(''); const [formError, setFormError] = useState(''); const [postError, setPostError] = useState(''); const [saving, setSaving] = useState(false);
-  const [selected, setSelected] = useState<ManualSupplyItem | null>(null); const [posting, setPosting] = useState(false); const [postResult, setPostResult] = useState<Record<string, unknown> | null>(null);
+  const [filter, setFilter] = useState('PENDING,EXCEPTION'); const [loading, setLoading] = useState(true); const [listError, setListError] = useState(''); const [formError, setFormError] = useState(''); const [saving, setSaving] = useState(false);
+  const [selected, setSelected] = useState<ManualSupplyItem | null>(null); const [posting, setPosting] = useState(false);
+  const [dialog, setDialog] = useState<'register' | 'confirm' | 'result' | null>(null);
+  const [result, setResult] = useState<{ kind: 'success' | 'error'; title: string; message: string } | null>(null);
   const postKey = useRef<{ id: number; key: string } | null>(null); const requestID = useRef(0);
 
   useEffect(() => { void adminApi.mealPeriods(session).then(response => setMeals(response.meal_periods || [])).catch(() => setMeals([])); }, [session]);
@@ -1448,63 +1501,99 @@ function ManualSupply({ session, onNotice }: { session: AdminSession; onNotice: 
 
   const configuredMeal = meals.find(meal => meal.code === form.meal_code);
   const amountCents = moneyInputCents(form.amount);
+  function closeResult() {
+    const failed = result?.kind === 'error';
+    setDialog(failed ? selected ? 'confirm' : 'register' : null);
+    setResult(null);
+  }
   async function submit(event: FormEvent) {
     event.preventDefault(); setFormError('');
     if (!employee || !form.meal_code || amountCents == null || !form.receipt_ref.trim() || !form.business_date) { setFormError('请选员工和餐次，并填写实际供餐金额、凭据与日期。'); return; }
     setSaving(true);
     try {
       await adminApi.generic(session, '/api/admin/manual-supplies', { method: 'POST', body: JSON.stringify({ employee_id: employee.id, meal_code: form.meal_code, amount_cents: amountCents, receipt_ref: form.receipt_ref.trim(), business_date: form.business_date, note: form.note.trim() }) });
-      onNotice('供餐事实已登记，当前尚未扣款。请在下方待处理记录中核对后补录。');
-      setForm({ meal_code: '', amount: '', receipt_ref: '', business_date: businessToday(), note: '' }); setEmployee(null);
+      setForm({ meal_code: '', amount: '', receipt_ref: '', business_date: businessToday(), note: '' }); setEmployee(null); setFormError('');
+      setResult({ kind: 'success', title: '供餐登记成功', message: '记录已加入列表，状态为“待核对”。此时尚未扣款，请在列表中核实后再补录。' });
+      setDialog('result');
       await refresh(filter);
-    } catch (reason) { setFormError(message(reason)); }
-    finally { setSaving(false); }
+    } catch (reason) {
+      setResult({ kind: 'error', title: '登记失败', message: message(reason) }); setDialog('result');
+    } finally { setSaving(false); }
   }
 
   async function postSelected() {
     if (!selected) return;
     if (postKey.current?.id !== selected.id) postKey.current = { id: selected.id, key: idempotencyKey() };
-    setPosting(true); setPostError('');
+    setPosting(true);
     try {
       const response = await adminApi.generic<Record<string, unknown>>(session, `/api/admin/manual-supplies/${selected.id}/post`, { method: 'POST', body: JSON.stringify({ idempotency_key: postKey.current.key }) });
-      postKey.current = null; setPostResult(response); setSelected(null);
-      onNotice(response.replayed === true ? '该记录此前已补录，服务端返回原结果，没有再次扣款。' : '已完成故障供餐补录，消费已记入资金流水。');
+      postKey.current = null;
+      const transaction = response.transaction as Record<string, unknown> | undefined;
+      const transactionID = transaction?.id || response.transaction_id || '已补录';
+      const postedAt = transaction?.created_at || response.transaction_created_at;
+      setSelected(null);
+      setResult({ kind: 'success', title: '补录成功', message: `记录已入账，消费流水 #${String(transactionID)}。${postedAt ? `日结按实际入账时间 ${formatAdminDate(String(postedAt))} 归属。` : ''}关闭提示后，可在列表确认状态和流水号。` });
+      setDialog('result');
       await refresh(filter);
     } catch (reason) {
-      setPostError(message(reason));
       const refreshed = await refresh(filter);
       const latest = refreshed.find(item => item.id === selected.id);
       if (latest) setSelected(latest);
-    }
-    finally { setPosting(false); }
+      setResult({ kind: 'error', title: '补录失败', message: message(reason) }); setDialog('result');
+    } finally { setPosting(false); }
+  }
+
+  function closeDialog() {
+    if (saving || posting) return;
+    if (dialog === 'result') { closeResult(); return; }
+    setDialog(null);
+    if (dialog === 'confirm') setSelected(null);
   }
 
   return <div className="manual-supply-flow">
-    <section className="manual-registration"><header><div><p className="admin-eyebrow">第一步</p><h3>登记实际供餐</h3></div><span className="admin-status warn">登记不会扣款</span></header><p className="admin-muted">填报已发生的供餐事实和实际凭据。餐次配置价格仅作参考，不会覆盖历史供餐金额。</p>
-      <form className="admin-form" onSubmit={submit}>
-        <EmployeeSelector session={session} value={employee} onChange={setEmployee} label="员工"/>
-        <div className="manual-input-grid"><label>餐次<select required value={form.meal_code} onChange={event => setForm({ ...form, meal_code: event.target.value })}><option value="">选择餐次</option><option value="BREAKFAST">早餐</option><option value="LUNCH">午餐</option><option value="DINNER">晚餐</option></select>{configuredMeal && <small>当前配置参考价格：{yuan(configuredMeal.price_cents)}；按实际凭据填写。</small>}</label>
-          <label>实际供餐金额（元）<input required inputMode="decimal" type="number" min="0.01" step="0.01" value={form.amount} onChange={event => setForm({ ...form, amount: event.target.value })}/></label><label>供餐日期<input required type="date" value={form.business_date} onChange={event => setForm({ ...form, business_date: event.target.value })}/></label><label>唯一凭据<input required maxLength={128} value={form.receipt_ref} onChange={event => setForm({ ...form, receipt_ref: event.target.value })} placeholder="纸质供餐登记编号"/></label><label className="manual-note-field">备注<input maxLength={512} value={form.note} onChange={event => setForm({ ...form, note: event.target.value })}/></label></div>
-        {formError && <div className="admin-alert error" role="alert">{formError}</div>}
-        <button className="admin-primary" disabled={saving || !employee || amountCents == null}>{saving ? '正在登记…' : '登记为待核对供餐'}</button>
-      </form>
-    </section>
-    <section className="manual-records"><header><div><p className="admin-eyebrow">第二步</p><h3>核对并处理记录</h3></div><label>显示记录<select value={filter} onChange={event => { setCursor(''); setFilter(event.target.value); setSelected(null); }}><option value="PENDING,EXCEPTION">待处理和异常</option><option value="PENDING">待核对</option><option value="EXCEPTION">异常待处理</option><option value="POSTED">已补录</option><option value="ALL">全部记录</option></select></label><button className="admin-secondary" type="button" disabled={loading} onClick={() => void refresh(filter)}>刷新</button></header>
+    <section className="manual-records manual-records-primary">
+      <header className="manual-list-toolbar">
+        <div><h3>供餐记录</h3><p className="admin-muted">登记供餐事实后，在列表中核实并补录；补录成功的记录会显示消费流水。</p></div>
+        <div className="manual-list-actions">
+          <label>记录状态<select value={filter} onChange={event => { setCursor(''); setFilter(event.target.value); setSelected(null); }}><option value="PENDING,EXCEPTION">待处理和异常</option><option value="PENDING">待核对</option><option value="EXCEPTION">异常待处理</option><option value="POSTED">已补录</option><option value="ALL">全部记录</option></select></label>
+          <button className="admin-secondary" type="button" disabled={loading} onClick={() => void refresh(filter)}>刷新列表</button>
+          <button className="admin-primary" type="button" onClick={() => { setFormError(''); setDialog('register'); }}>登记供餐</button>
+        </div>
+      </header>
       {listError && <ErrorBox retry={() => void refresh(filter)}>{listError}</ErrorBox>}
       {loading && !items.length ? <Loading/> : items.length ? <div className="admin-table-wrap"><table className="admin-table manual-supply-table"><thead><tr><th>员工</th><th>供餐事实</th><th>实际入账</th><th>状态与原因</th><th>操作</th></tr></thead><tbody>{items.map(item => <tr key={item.id}>
-        <td><strong>{item.employee_name}</strong><small>{item.employee_no} · {item.department || '未填写部门'}</small><small>{accountStatusLabel(item.account_status)}</small></td><td>{item.meal_name}<small>{item.business_date} · {yuan(item.amount_cents)} · {item.receipt_ref}</small></td><td>{item.transaction_id ? <>{formatAdminDate(item.transaction_created_at)}<small>消费流水 #{item.transaction_id}</small></> : '尚未入账'}</td><td>{manualStatusLabel(item.status)}{item.exception_reason && <small className="inline-error">{manualExceptionLabel(item.exception_reason)}</small>}</td><td>{item.status === 'PENDING' || item.status === 'EXCEPTION' ? <button className="admin-link" type="button" onClick={() => { setSelected(item); setPostResult(null); setPostError(''); }}>核对并补录</button> : <span className="admin-muted">已完成</span>}</td>
-      </tr>)}</tbody></table></div> : !loading ? <div className="admin-empty">当前筛选下没有补录记录。</div> : null}
+        <td><strong>{item.employee_name}</strong><small>{item.employee_no} · {item.department || '未填写部门'}</small><small>{accountStatusLabel(item.account_status)}</small></td><td>{item.meal_name}<small>{item.business_date} · {yuan(item.amount_cents)} · {item.receipt_ref}</small></td><td>{item.transaction_id ? <>{formatAdminDate(item.transaction_created_at)}<small>消费流水 #{item.transaction_id}</small></> : '尚未入账'}</td><td><span className={`admin-status ${item.status === 'POSTED' ? 'ok' : item.status === 'EXCEPTION' ? 'warn' : ''}`}>{manualStatusLabel(item.status)}</span>{item.exception_reason && <small className="inline-error">{manualExceptionLabel(item.exception_reason)}</small>}</td><td>{item.status === 'PENDING' || item.status === 'EXCEPTION' ? <button className="admin-link" type="button" onClick={() => { setSelected(item); setResult(null); setDialog('confirm'); }}>核对并补录</button> : <span className="admin-muted">已完成</span>}</td>
+      </tr>)}</tbody></table></div> : !loading ? <div className="admin-empty">当前筛选下没有供餐记录，可点击“登记供餐”新建。</div> : null}
       {cursor && <button className="admin-secondary load-more" type="button" disabled={loading} onClick={() => void refresh(filter, true, cursor)}>加载更多记录</button>}
     </section>
-    {postResult && <div className="admin-alert success" role="status">服务端返回入账结果：交易 #{String((postResult.transaction as Record<string, unknown> | undefined)?.id || postResult.transaction_id || postResult.id || '已补录')}。日结按实际入账时间 {((postResult.transaction as Record<string, unknown> | undefined)?.created_at || postResult.transaction_created_at) ? formatAdminDate(String((postResult.transaction as Record<string, unknown> | undefined)?.created_at || postResult.transaction_created_at)) : '登记时间'} 归属。</div>}
-    {selected && <section className="manual-post-confirm"><header><div><p className="admin-eyebrow">请再次核对</p><h3>确认将供餐记录记为消费</h3></div><button className="admin-link" type="button" onClick={() => setSelected(null)}>取消</button></header>
-      <div className="record-summary-grid"><div><span>员工</span><strong>{selected.employee_name}（{selected.employee_no}）</strong><small>{selected.department || '未填写部门'} · {accountStatusLabel(selected.account_status)}</small></div><div><span>供餐日期与餐次</span><strong>{selected.business_date} · {selected.meal_name}</strong><small>员工状态：{accountStatusLabel(selected.employee_status)}</small></div><div><span>金额与凭据</span><strong>{yuan(selected.amount_cents)}</strong><small>{selected.receipt_ref}</small></div><div><span>登记备注</span><strong>{selected.note || '无'}</strong><small>登记时间 {formatAdminDate(selected.created_at)}</small></div></div>
-      {selected.exception_reason && <div className="admin-alert error" role="alert">上次处理未完成：{manualExceptionLabel(selected.exception_reason)}。修正账户或余额后，可从原记录重试。</div>}
-      <p className="manual-charge-warning">{selected.account_status !== 'ACTIVE' || selected.employee_status !== 'ACTIVE' ? '员工或账户不可用时，提交只会记录异常、不扣款。状态修正后可从此记录重新核对。' : `确认后将扣款 ${yuan(selected.amount_cents)}，按实际入账时间计入日结；重复请求不会再次扣款。`}</p>
-      {(selected.account_status !== 'ACTIVE' || selected.employee_status !== 'ACTIVE') && <div className="admin-alert error" role="status">员工或账户当前不可用。提交只会将记录标记为异常，不会扣款；处理状态后可从此记录重试。</div>}
-      {postError && <div className="admin-alert error" role="alert">{postError}</div>}
-      <button className="admin-primary" type="button" disabled={posting} onClick={() => void postSelected()}>{posting ? '正在核对并入账…' : selected.account_status !== 'ACTIVE' || selected.employee_status !== 'ACTIVE' ? '核对不可用状态并标记异常' : `确认补录并扣款 ${yuan(selected.amount_cents)}`}</button>
-    </section>}
+
+    {dialog === 'register' && <Modal title="登记实际供餐" className="manual-supply-modal" onClose={closeDialog}>
+      <p className="admin-muted manual-dialog-intro">登记已经发生的供餐事实。登记不会扣款，核对记录并确认补录后才会记入员工账户。</p>
+      <form className="admin-form manual-dialog-form" onSubmit={submit}>
+        <EmployeeSelector session={session} value={employee} onChange={setEmployee} label="员工"/>
+        <div className="manual-input-grid">
+          <label>餐次<select required value={form.meal_code} onChange={event => setForm({ ...form, meal_code: event.target.value })}><option value="">选择餐次</option><option value="BREAKFAST">早餐</option><option value="LUNCH">午餐</option><option value="DINNER">晚餐</option></select>{configuredMeal && <small>当前配置参考价格：{yuan(configuredMeal.price_cents)}；按实际凭据填写。</small>}</label>
+          <label>实际供餐金额（元）<input required inputMode="decimal" type="number" min="0.01" step="0.01" value={form.amount} onChange={event => setForm({ ...form, amount: event.target.value })}/></label>
+          <label>供餐日期<input required type="date" value={form.business_date} onChange={event => setForm({ ...form, business_date: event.target.value })}/></label>
+          <label>唯一凭据<input required maxLength={128} value={form.receipt_ref} onChange={event => setForm({ ...form, receipt_ref: event.target.value })} placeholder="纸质供餐登记编号"/></label>
+          <label className="manual-note-field">备注<input maxLength={512} value={form.note} onChange={event => setForm({ ...form, note: event.target.value })}/></label>
+        </div>
+        {formError && <div className="admin-alert error" role="alert">{formError}</div>}
+        <div className="admin-form-actions"><button className="admin-secondary" type="button" disabled={saving} onClick={closeDialog}>取消</button><button className="admin-primary" disabled={saving || !employee || amountCents == null}>{saving ? '正在登记…' : '登记为待核对记录'}</button></div>
+      </form>
+    </Modal>}
+
+    {dialog === 'confirm' && selected && <Modal title="核对供餐记录" className="manual-supply-modal" onClose={closeDialog}>
+      <div className="record-summary-grid manual-confirm-grid"><div><span>员工</span><strong>{selected.employee_name}（{selected.employee_no}）</strong><small>{selected.department || '未填写部门'} · {accountStatusLabel(selected.account_status)}</small></div><div><span>供餐日期与餐次</span><strong>{selected.business_date} · {selected.meal_name}</strong><small>员工状态：{accountStatusLabel(selected.employee_status)}</small></div><div><span>实际供餐金额</span><strong>{yuan(selected.amount_cents)}</strong><small>凭据：{selected.receipt_ref}</small></div><div><span>登记备注</span><strong>{selected.note || '无'}</strong><small>登记时间 {formatAdminDate(selected.created_at)}</small></div></div>
+      {selected.exception_reason && <div className="admin-alert error" role="alert">上次处理未完成：{manualExceptionLabel(selected.exception_reason)}。处理后可从原记录重试。</div>}
+      <p className="manual-charge-warning">{selected.account_status !== 'ACTIVE' || selected.employee_status !== 'ACTIVE' ? '员工或账户不可用，确认后只会将记录标记为异常，不会扣款。' : `确认后将扣款 ${yuan(selected.amount_cents)}，并按实际入账时间计入日结。`}</p>
+      <div className="admin-form-actions"><button className="admin-secondary" type="button" disabled={posting} onClick={closeDialog}>返回列表</button><button className="admin-primary" type="button" disabled={posting} onClick={() => void postSelected()}>{posting ? '正在核对并入账…' : selected.account_status !== 'ACTIVE' || selected.employee_status !== 'ACTIVE' ? '标记异常' : `确认补录并扣款 ${yuan(selected.amount_cents)}`}</button></div>
+    </Modal>}
+
+    {dialog === 'result' && result && <Modal title={result.title} className="manual-result-modal" onClose={closeDialog}>
+      <div className={`admin-alert ${result.kind === 'success' ? 'success' : 'error'} manual-result-message`} role={result.kind === 'success' ? 'status' : 'alert'}><strong>{result.kind === 'success' ? '操作已完成' : '操作未完成'}</strong><p>{result.message}</p></div>
+      <div className="admin-form-actions"><button className="admin-primary" type="button" onClick={closeResult}>{result.kind === 'success' ? '返回记录列表核实' : selected ? '返回核对并重试' : '返回修改'}</button></div>
+    </Modal>}
   </div>;
 }
 

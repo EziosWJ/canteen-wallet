@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -19,11 +20,25 @@ const (
 )
 
 var ErrWeakPassword = errors.New("password must be 12 to 1024 bytes")
+var ErrWeakEmployeePassword = errors.New("employee password must be 6 to 1024 characters")
 
 func HashPassword(password string) (string, error) {
 	if len(password) < 12 || len(password) > 1024 {
 		return "", ErrWeakPassword
 	}
+	return hashPassword(password)
+}
+
+// HashEmployeePassword allows employee-selected passwords of six or more
+// Unicode characters. Administrator password policy remains separate.
+func HashEmployeePassword(password string) (string, error) {
+	if utf8.RuneCountInString(password) < 6 || len(password) > 1024 {
+		return "", ErrWeakEmployeePassword
+	}
+	return hashPassword(password)
+}
+
+func hashPassword(password string) (string, error) {
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err

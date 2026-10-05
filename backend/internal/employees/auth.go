@@ -154,7 +154,7 @@ func (s *Service) ChangePassword(ctx context.Context, principal Principal, oldPa
 	if !adminauth.VerifyPassword(oldPassword, oldHash) {
 		return Session{}, ErrInvalidCredentials
 	}
-	newHash, err := adminauth.HashPassword(newPassword)
+	newHash, err := adminauth.HashEmployeePassword(newPassword)
 	if err != nil {
 		return Session{}, err
 	}

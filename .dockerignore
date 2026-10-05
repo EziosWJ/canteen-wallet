@@ -1,0 +1,13 @@
+.git
+.task
+build
+data
+backups
+web/node_modules
+web/dist
+backend/internal/webassets/dist/*
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3

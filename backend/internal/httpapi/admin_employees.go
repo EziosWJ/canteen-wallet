@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/EziosWJ/canteen-wallet/backend/internal/adminauth"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/employees"
 )
 
@@ -98,7 +99,13 @@ func adminEmployeeRoutes(admin *http.ServeMux, service *employees.Service) {
 			return
 		}
 		if len(parts) == 2 && parts[1] == "reset-password" && r.Method == http.MethodPost {
-			password, err := service.ResetPassword(r.Context(), actorID, id)
+			var request struct {
+				Password string `json:"password"`
+			}
+			if !decodeJSON(w, r, 8192, &request) {
+				return
+			}
+			password, err := service.ResetPassword(r.Context(), actorID, id, request.Password)
 			if err != nil {
 				employeeError(w, err)
 				return
@@ -134,6 +141,8 @@ func employeeSearchInput(r *http.Request) (employees.SearchInput, bool) {
 
 func employeeError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, adminauth.ErrWeakEmployeePassword):
+		WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "password must be at least 6 characters and no more than 1024 bytes")
 	case errors.Is(err, employees.ErrInvalidInput), errors.Is(err, employees.ErrInvalidCredentials):
 		WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "invalid employee request")
 	case errors.Is(err, employees.ErrConflict):

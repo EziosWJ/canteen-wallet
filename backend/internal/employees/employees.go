@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -91,7 +92,7 @@ func (s *Service) Create(ctx context.Context, actorID int64, input CreateInput) 
 	if err != nil {
 		return Employee{}, "", err
 	}
-	hash, err := adminauth.HashPassword(temporaryPassword)
+	hash, err := adminauth.HashEmployeePassword(temporaryPassword)
 	if err != nil {
 		return Employee{}, "", err
 	}
@@ -330,12 +331,16 @@ func (s *Service) SetStatus(ctx context.Context, actorID, id int64, target strin
 	return s.Get(ctx, id)
 }
 
-func (s *Service) ResetPassword(ctx context.Context, actorID, id int64) (string, error) {
-	temporaryPassword, err := newTemporaryPassword()
-	if err != nil {
-		return "", err
+func (s *Service) ResetPassword(ctx context.Context, actorID, id int64, requestedPassword string) (string, error) {
+	temporaryPassword := requestedPassword
+	var err error
+	if temporaryPassword == "" {
+		temporaryPassword, err = newTemporaryPassword()
+		if err != nil {
+			return "", err
+		}
 	}
-	hash, err := adminauth.HashPassword(temporaryPassword)
+	hash, err := adminauth.HashEmployeePassword(temporaryPassword)
 	if err != nil {
 		return "", err
 	}
@@ -414,11 +419,15 @@ func validPhotoURL(value string) bool {
 }
 
 func newTemporaryPassword() (string, error) {
-	raw := make([]byte, 18)
-	if _, err := rand.Read(raw); err != nil {
-		return "", err
+	var password strings.Builder
+	for range 6 {
+		digit, err := rand.Int(rand.Reader, big.NewInt(10))
+		if err != nil {
+			return "", err
+		}
+		password.WriteByte(byte('0' + digit.Int64()))
 	}
-	return base64.RawURLEncoding.EncodeToString(raw), nil
+	return password.String(), nil
 }
 
 func nullString(value string) any {

@@ -212,8 +212,8 @@ export const adminApi = {
   setEmployeeStatus(session: AdminSession, id: number, status: string) {
     return request<AdminEmployee>(`/api/admin/employees/${id}/status`, session, { method: 'PATCH', body: JSON.stringify({ status }) });
   },
-  resetEmployeePassword(session: AdminSession, id: number) {
-    return request<{ temporary_password: string }>(`/api/admin/employees/${id}/reset-password`, session, { method: 'POST', body: '{}' });
+  resetEmployeePassword(session: AdminSession, id: number, password?: string) {
+    return request<{ temporary_password: string }>(`/api/admin/employees/${id}/reset-password`, session, { method: 'POST', body: JSON.stringify(password ? { password } : {}) });
   },
   mealPeriods(session: AdminSession) { return request<{ meal_periods: AdminMeal[] }>('/api/admin/meal-periods', session); },
   updateMeal(session: AdminSession, meal: AdminMeal) {

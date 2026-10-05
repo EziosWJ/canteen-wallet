@@ -1,0 +1,26 @@
+services:
+  canteen-server:
+    image: canteen-wallet:employee-passwords-20261005
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5001:5001"
+      - "127.0.0.1:8081:8081"
+    environment:
+      CANTEEN_PUBLIC_ADDR: 172.18.0.10:5001
+      CANTEEN_INTERNAL_ADDR: 172.18.0.10:8081
+      CANTEEN_DB_PATH: /var/lib/canteen/canteen.db
+      CANTEEN_TIME_ZONE: ${CANTEEN_TIME_ZONE:-Asia/Shanghai}
+      CANTEEN_BACKUP_EXTERNAL_DIR: /mnt/canteen-backup
+    volumes:
+      - ../data:/var/lib/canteen
+      - ../backups:/mnt/canteen-backup
+    networks:
+      1panel:
+        ipv4_address: 172.18.0.10
+        aliases:
+          - canteen-wallet
+
+networks:
+  1panel:
+    external: true
+    name: 1panel-network

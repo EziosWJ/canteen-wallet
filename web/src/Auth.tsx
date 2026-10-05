@@ -85,7 +85,7 @@ export function PasswordChange({ session, forced, onChanged, onCancel, onExpired
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError('');
-    if (new TextEncoder().encode(newPassword).length < 12) { setError('新密码至少需要 12 个字节。'); return; }
+    if ([...newPassword].length < 6) { setError('新密码至少需要 6 位，不限制字符类型。'); return; }
     if (newPassword === oldPassword) { setError('新密码不能与当前密码相同。'); return; }
     if (newPassword !== confirm) { setError('两次输入的新密码不一致。'); return; }
     setBusy(true);
@@ -106,7 +106,7 @@ export function PasswordChange({ session, forced, onChanged, onCancel, onExpired
     <form onSubmit={submit}>
       {error && <div className="alert alert-error" role="alert">{error}</div>}
       <label className="field"><span>当前密码</span><div className="input-wrap"><Icon name="lock"/><input type="password" autoComplete="current-password" value={oldPassword} onChange={e => setOldPassword(e.target.value)} required/></div></label>
-      <label className="field"><span>新密码</span><div className="input-wrap"><Icon name="lock"/><input type="password" autoComplete="new-password" value={newPassword} onChange={e => setNewPassword(e.target.value)} required/></div><small>至少 12 个字节</small></label>
+      <label className="field"><span>新密码</span><div className="input-wrap"><Icon name="lock"/><input type="password" autoComplete="new-password" value={newPassword} onChange={e => setNewPassword(e.target.value)} required minLength={6}/></div><small>至少 6 位，不限制字符类型</small></label>
       <label className="field"><span>确认新密码</span><div className="input-wrap"><Icon name="lock"/><input type="password" autoComplete="new-password" value={confirm} onChange={e => setConfirm(e.target.value)} required/></div></label>
       <button className="primary-button full" type="submit" disabled={busy}>{busy ? '正在保存…' : '保存新密码'}</button>
     </form>

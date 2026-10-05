@@ -191,8 +191,8 @@ func employeeRoutes(public *http.ServeMux, service *employees.Service, tokenServ
 			WriteError(w, http.StatusUnauthorized, CodeInvalidCredentials, "invalid credentials")
 		case errors.Is(err, employees.ErrUnauthenticated):
 			employeeUnauthorized(w)
-		case errors.Is(err, adminauth.ErrWeakPassword):
-			WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "new password must be 12 to 1024 bytes")
+		case errors.Is(err, adminauth.ErrWeakEmployeePassword):
+			WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "new password must be at least 6 characters and no more than 1024 bytes")
 		case err != nil:
 			employeeError(w, err)
 		default:
