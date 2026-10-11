@@ -1353,6 +1353,13 @@ function MealConfiguration({ meals, savedMeals, busy, onChange, onDiscard, onSav
       const parsed = nonnegativeMoneyInputCents(meal.price_text);
       return { ...meal, price_cents: parsed ?? meal.price_cents };
     });
+    // Suspending every period is legitimate — a holiday, a closed kitchen — but
+    // taking the canteen from serving to not serving must not happen as a side
+    // effect of editing times and prices. Re-saving an already suspended set
+    // only re-states what the banner under the grid already says.
+    const serving = savedMeals.some(meal => meal.enabled);
+    if (serving && payload.every(meal => !meal.enabled)
+      && !window.confirm('三个餐次都设为“暂停供应”，保存后员工无法消费。确定保存吗？')) return;
     setSaving(true);
     try { await onSave(payload); }
     catch (reason) {
@@ -1382,6 +1389,7 @@ function MealConfiguration({ meals, savedMeals, busy, onChange, onDiscard, onSav
         <p className="meal-price-note">{meal.enabled ? '开放时需设置大于 0 的餐费。' : '暂停供应仍需保持有效时段，避免与其他餐次重叠。'}</p>
       </section>;
     })}</div>
+    {savedMeals.length > 0 && savedMeals.every(meal => !meal.enabled) && <div className="admin-alert warn" role="status">三个餐次全部“暂停供应”，员工当前无法消费。开放任一餐次并保存后即可恢复。</div>}
     {(malformed || overlaps) && <div className="admin-alert error" role="alert">{overlaps ? '餐次时间存在重叠，请修正后保存。' : '请检查餐次名称、时段和价格；开放餐次的价格必须大于 0。'}</div>}
     {error && <div className="admin-alert error" role="alert">{error}</div>}
     <div className="meal-savebar" aria-live="polite"><div><strong>{dirty ? `${changedCodes.length} 个餐次有未保存修改` : '全部餐次配置已保存'}</strong><small>{dirty ? '保存会一次提交早餐、午餐和晚餐的完整配置。' : '修改任一面板后，在此统一保存。'}</small></div><div className="admin-inline-actions">{dirty && <button className="admin-secondary" type="button" disabled={saving || busy} onClick={() => { if (window.confirm('确定放弃所有餐次修改？')) { onDiscard(); setError(''); } }}>放弃修改</button>}<button className="admin-primary" disabled={!canSave} type="submit">{saving ? '正在保存全部餐次…' : dirty ? '保存全部餐次' : '全部已保存'}</button></div></div>
