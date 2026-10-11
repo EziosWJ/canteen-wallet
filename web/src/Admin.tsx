@@ -53,31 +53,54 @@ function canonicalPath(pathname: string, search: string): string | null {
 }
 
 /** The message shown when the server refuses something the page could have
- * predicted. Every security endpoint answers with a code, and the code is the
- * stable contract; the message is only a fallback. */
-function securityMessage(error: unknown): string {
-  if (!(error instanceof AdminApiError)) return '操作失败，请稍后重试。';
-  switch (error.code) {
-    case 'INVALID_CREDENTIALS': return '密码或当前动态验证码不正确。';
-    case 'INVALID_STATE': return error.message;
-    case 'CONFLICT': return error.message;
-    case 'ALREADY_INITIALIZED': return '系统已经有管理员，无法再次初始化。';
-    case 'ENTRANCE_DISABLED': return '该消费入口已关闭。';
-    default: return message(error);
-  }
-}
-
+ * predicted. Every endpoint answers with a stable code, and the code is the
+ * contract this page reads; the server's own message is English and is only
+ * ever a last resort. The sign-in form and the signed-in console share this one
+ * function so the same refusal cannot read two different ways. */
 function message(error: unknown): string {
   if (!(error instanceof AdminApiError)) return '操作失败，请稍后重试。';
+  switch (error.code) {
+    // Sign-in answers INVALID_CREDENTIALS with 401 for every refusal — unknown
+    // account, wrong password, wrong or missing code — so this case is read
+    // before the session-expiry one below, or a refused sign-in is reported as
+    // an expired session. A session that really expired answers UNAUTHORIZED.
+    case 'INVALID_CREDENTIALS': return '账号或密码不正确；已绑定动态验证码的账号还需同时输入验证器上当前的验证码。';
+    case 'INSUFFICIENT_FUNDS': return '账户余额不足；记录已标记为异常，补足余额后可从此记录重试。';
+    case 'ACCOUNT_UNAVAILABLE': return '员工或账户状态不可用；记录已标记为异常，请处理状态后从此记录重试。';
+    case 'ALREADY_INITIALIZED': return '系统已经有管理员，无法再次初始化。';
+    case 'ENTRANCE_DISABLED': return '该消费入口已关闭。';
+    case 'SERVICE_UNAVAILABLE': return '服务暂时不可用，请稍后重试。';
+    case 'INVALID_STATE': return secondFactorStateMessage(error.message);
+    case 'CONFLICT': return conflictMessage(error.message);
+    case 'INVALID_REQUEST':
+      // The import endpoints answer their refusals in Chinese already (the
+      // template header, for one), so an unrecognised detail is passed through
+      // rather than replaced by a generic line.
+      if (error.message.includes('administrator username')) return '管理员账号名不合法：需为 3 至 64 位的字母、数字、点、下划线或连字符。';
+      if (error.message.includes('initial password')) return '初始密码至少需要 12 个字符。';
+      return error.message;
+  }
   if (error.status === 401) return '管理员会话已失效，请重新登录。';
   if (error.status === 404) return '此功能的服务接口尚未开放。';
-  if (error.code === 'INVALID_CREDENTIALS') return '账号、密码不正确，或该账号需要正确的动态验证码。';
-  if (error.code === 'INSUFFICIENT_FUNDS') return '账户余额不足；记录已标记为异常，补足余额后可从此记录重试。';
-  if (error.code === 'ACCOUNT_UNAVAILABLE') return '员工或账户状态不可用；记录已标记为异常，请处理状态后从此记录重试。';
-  if (error.code === 'CONFLICT' && error.message.includes('preview already confirmed')) return '此预览已提交过。为保护临时密码，不能再次读取导入结果；请检查员工列表后重新上传需要补充的记录。';
-  if (error.code === 'CONFLICT' && error.message.includes('preview expired')) return '导入预览已过期，请重新上传文件并核对行数。';
-  if (error.code === 'NETWORK') return error.message;
   return error.message;
+}
+
+/** The second-factor endpoints report every refusal as INVALID_STATE, so the
+ * server's own message is the only thing that tells them apart. */
+function secondFactorStateMessage(detail: string): string {
+  if (detail.includes('no second factor is bound')) return '该账号尚未绑定动态验证码，无需解绑。';
+  if (detail.includes('no pending second factor enrollment')) return '当前没有待确认的动态验证码绑定；请重新开始绑定并扫描新的二维码。';
+  if (detail.includes('has expired')) return '这次绑定已超过十分钟，已经失效；请重新开始绑定。';
+  return '当前状态不允许此操作，请刷新页面后重试。';
+}
+
+/** Creating an administrator and confirming an import preview both refuse with
+ * CONFLICT. */
+function conflictMessage(detail: string): string {
+  if (detail.includes('username is already taken')) return '该管理员账号名已被占用，请换一个。';
+  if (detail.includes('preview already confirmed')) return '此预览已提交过。为保护临时密码，不能再次读取导入结果；请检查员工列表后重新上传需要补充的记录。';
+  if (detail.includes('preview expired')) return '导入预览已过期，请重新上传文件并核对行数。';
+  return '操作与当前状态冲突，请刷新页面后重试。';
 }
 
 function yuan(cents: number): string { return `¥${(cents / 100).toFixed(2)}`; }
@@ -174,7 +197,7 @@ export function Initialization({ onReady }: { onReady: (session: AdminSession, n
       const session = await adminApi.initialize({ username: username.trim(), password, ...modes });
       saveAdminSession(session);
       onReady(session, session.next_step);
-    } catch (reason) { setError(securityMessage(reason)); }
+    } catch (reason) { setError(message(reason)); }
     finally { setBusy(false); }
   }
 
@@ -1693,7 +1716,7 @@ function SelfSecurityPanel({ session, security, busy, onNotice, onExpired }: {
     try {
       const value = await adminApi.startEnrollment(session, password, currentCode.trim());
       setEnrollment(value); setStep('scan'); setConfirmCode('');
-    } catch (reason) { onNotice(securityMessage(reason)); }
+    } catch (reason) { onNotice(message(reason)); }
     finally { setLocalBusy(false); }
   }
 
@@ -1707,7 +1730,7 @@ function SelfSecurityPanel({ session, security, busy, onNotice, onExpired }: {
       saveAdminSession(null);
       onNotice('动态验证码已启用，请使用新验证码重新登录。');
       onExpired();
-    } catch (reason) { onNotice(securityMessage(reason)); }
+    } catch (reason) { onNotice(message(reason)); }
     finally { setLocalBusy(false); }
   }
 
@@ -1719,7 +1742,7 @@ function SelfSecurityPanel({ session, security, busy, onNotice, onExpired }: {
       saveAdminSession(null);
       onNotice('动态验证码已解除绑定，请重新登录。');
       onExpired();
-    } catch (reason) { onNotice(securityMessage(reason)); }
+    } catch (reason) { onNotice(message(reason)); }
     finally { setLocalBusy(false); }
   }
 
@@ -1788,7 +1811,7 @@ function AdministratorPanel({ session, me, accounts, busy, onNotice, onChanged }
       onNotice(`管理员 ${created.administrator.username} 已创建。请通过安全渠道交付初始密码；该账号未绑定动态验证码，首次登录后可在“管理员与安全”中自行绑定。`);
       setShowCreate(false); setUsername(''); setPassword('');
       onChanged();
-    } catch (reason) { onNotice(securityMessage(reason)); }
+    } catch (reason) { onNotice(message(reason)); }
     finally { setLocalBusy(false); }
   }
 
