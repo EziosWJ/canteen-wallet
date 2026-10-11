@@ -44,6 +44,7 @@ function stateLabel(code?: string): { title: string; detail: string; kind: strin
     case 'MEAL_ENDED': case 'PENDING_EXPIRED': return { title: '确认已失效', detail: '本次未扣款，请重新扫码', kind: 'failure' };
     case 'USER_FROZEN': case 'ACCOUNT_FROZEN': case 'ACCOUNT_UNAVAILABLE': return { title: '账户暂不可用', detail: '请联系管理员处理', kind: 'failure' };
     case 'NO_ACTIVE_MEAL': case 'NO_MEAL': return { title: '当前时段未开放', detail: '请确认当前供餐安排', kind: 'failure' };
+    case 'MEALS_SUSPENDED': return { title: '食堂未开放供餐', detail: '所有餐次已暂停供应，请联系管理员', kind: 'failure' };
     case 'INVALID_TOKEN': case 'EXPIRED_TOKEN': case 'INVALID_SESSION': case 'TOKEN_INVALID': case 'TOKEN_UNAVAILABLE': case 'SUPERSEDED': return { title: '就餐码无效或已过期', detail: '请员工刷新就餐码后重试', kind: 'failure' };
     case 'TERMINAL_DISABLED': case 'DEVICE_OFFLINE': case 'BACKEND_UNAVAILABLE': return { title: '终端暂不可用', detail: '请联系现场管理员', kind: 'failure' };
     case 'FAILED': return { title: '核销未完成', detail: '请按提示处理后重试', kind: 'failure' };

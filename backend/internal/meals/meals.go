@@ -17,6 +17,11 @@ var (
 	ErrOverlap        = errors.New("meal periods overlap")
 	ErrNotFound       = errors.New("meal period not found")
 	ErrNoActivePeriod = errors.New("no active meal period")
+	// ErrNoEnabledPeriod reports that no meal period is enabled at all.
+	// Suspending every period is a configuration state rather than a
+	// time-of-day one, so a caller can tell the employee to ask an
+	// administrator instead of to come back inside the next window.
+	ErrNoEnabledPeriod = errors.New("no meal period is enabled")
 )
 
 type Period struct {
@@ -256,9 +261,27 @@ func activeAt(ctx context.Context, db queryRower, local time.Time) (Period, erro
 	period, err := scanPeriod(db.QueryRowContext(ctx, `SELECT code, name, start_minute, end_minute, price_cents, enabled
 		FROM meal_periods WHERE enabled = 1 AND start_minute <= ? AND end_minute > ?`, minute, minute))
 	if errors.Is(err, sql.ErrNoRows) {
+		open, countErr := anyEnabled(ctx, db)
+		if countErr != nil {
+			return Period{}, countErr
+		}
+		if !open {
+			return Period{}, ErrNoEnabledPeriod
+		}
 		return Period{}, ErrNoActivePeriod
 	}
 	return period, err
+}
+
+// anyEnabled reports whether any meal period is open for service at all. It runs
+// only after the active lookup found nothing, and it is what separates a canteen
+// with every period suspended from one whose next window has not opened yet.
+func anyEnabled(ctx context.Context, db queryRower) (bool, error) {
+	var open int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM meal_periods WHERE enabled = 1`).Scan(&open); err != nil {
+		return false, err
+	}
+	return open > 0, nil
 }
 
 type scanner interface{ Scan(...any) error }

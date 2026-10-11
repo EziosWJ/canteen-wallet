@@ -157,9 +157,13 @@ func TestSelfServicePreviewShowsServerDecidedMealAndPrice(t *testing.T) {
 // no attempt to confirm can charge.
 func TestSelfServicePreviewRejectsWhenNoMealIsActive(t *testing.T) {
 	e := newEnv(t)
-	e.disableAllMeals()
+	e.activateMeal(defaultMealCode, defaultMealName, mealPrice, 20*time.Minute, 20*time.Minute)
 	worker := e.newEmployee("S002", "13800000402", "韩二")
 	e.recharge(worker.id, 5000, "R-S002")
+
+	// The period stays open for service; only its window has passed. That is the
+	// time-of-day refusal, not a canteen that stopped serving.
+	e.endMealNow(defaultMealCode)
 
 	preview := e.openSelfService(worker.session)
 
@@ -177,6 +181,35 @@ func TestSelfServicePreviewRejectsWhenNoMealIsActive(t *testing.T) {
 	}
 	if balance := e.employeeBalance(worker.session); balance != 5000 {
 		t.Fatalf("balance is %d without an active meal, want 5000", balance)
+	}
+}
+
+// TestSelfServicePreviewReportsSuspendedMeals covers the other reason no meal
+// resolves: every period is suspended, so the employee is told the canteen is
+// not serving at all and an administrator has to open one, rather than being
+// told to come back later inside a window that will never open.
+func TestSelfServicePreviewReportsSuspendedMeals(t *testing.T) {
+	e := newEnv(t)
+	e.disableAllMeals()
+	worker := e.newEmployee("S002", "13800000402", "韩二")
+	e.recharge(worker.id, 5000, "R-S002")
+
+	preview := e.openSelfService(worker.session)
+
+	if preview.Status != "UNAVAILABLE" {
+		t.Fatalf("preview status is %s, want UNAVAILABLE when every meal is suspended", preview.Status)
+	}
+	if preview.Code != "MEALS_SUSPENDED" {
+		t.Fatalf("preview code is %s, want MEALS_SUSPENDED", preview.Code)
+	}
+	if preview.IntentID != "" {
+		t.Fatalf("unavailable preview returned credential %q, want none", preview.IntentID)
+	}
+	if preview.Message == "" {
+		t.Fatal("unavailable preview gave no reason for the employee")
+	}
+	if balance := e.employeeBalance(worker.session); balance != 5000 {
+		t.Fatalf("balance is %d with every meal suspended, want 5000", balance)
 	}
 }
 

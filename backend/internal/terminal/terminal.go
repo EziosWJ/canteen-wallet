@@ -232,6 +232,9 @@ func (s *Service) Scan(ctx context.Context, terminalID, token string) (Result, e
 		return s.failScan(ctx, tx, meta, record, Result{Status: "FAILED", Code: "MODE_DISABLED", Message: "就餐码消费已关闭"})
 	}
 	period, err := s.meals.ActiveAtTx(ctx, tx, now)
+	if errors.Is(err, meals.ErrNoEnabledPeriod) {
+		return s.failScan(ctx, tx, meta, record, Result{Status: "FAILED", Code: "MEALS_SUSPENDED", Message: "食堂当前未开放供餐"})
+	}
 	if errors.Is(err, meals.ErrNoActivePeriod) {
 		return s.failScan(ctx, tx, meta, record, Result{Status: "FAILED", Code: "NO_MEAL", Message: "当前无可用餐次"})
 	}

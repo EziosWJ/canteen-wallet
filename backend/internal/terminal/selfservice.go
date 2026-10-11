@@ -182,6 +182,9 @@ func (s *Service) currentPreview(ctx context.Context, tx *sql.Tx, principal empl
 	local := now.In(s.location)
 	date := local.Format("2006-01-02")
 	period, err := s.meals.ActiveAtTx(ctx, tx, now)
+	if errors.Is(err, meals.ErrNoEnabledPeriod) {
+		return SelfServicePreview{Status: "UNAVAILABLE", Code: "MEALS_SUSPENDED", Message: "食堂当前未开放供餐"}, nil
+	}
 	if errors.Is(err, meals.ErrNoActivePeriod) {
 		return SelfServicePreview{Status: "UNAVAILABLE", Code: "NO_ACTIVE_PERIOD", Message: "当前不在用餐时段"}, nil
 	}
@@ -464,6 +467,8 @@ func selfServiceMessage(code string) string {
 		return "账户不可用"
 	case "NO_ACTIVE_PERIOD":
 		return "当前不在用餐时段"
+	case "MEALS_SUSPENDED":
+		return "食堂当前未开放供餐"
 	case "MODE_DISABLED":
 		return "自助消费已关闭"
 	case "PREVIEW_CHANGED":

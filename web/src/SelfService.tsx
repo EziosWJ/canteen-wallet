@@ -71,9 +71,13 @@ function SelfServicePage({ session, employee, onExpired, onForced }: {
   const [consumption, setConsumption] = useState<ConsumptionResult | null>(null);
   const [message, setMessage] = useState('');
   const [notice, setNotice] = useState('');
-  // The server reports a switched-off entrance through the preview, so the
-  // closed state is derived from the payload rather than guessed locally.
-  const [closed, setClosed] = useState(false);
+  // The server reports why nothing can be charged through the payload, so the
+  // reason is kept as the server's own code rather than guessed locally: a
+  // switched-off entrance, a suspended canteen and an empty window all need
+  // different words.
+  const [unavailableCode, setUnavailableCode] = useState('');
+  const closed = unavailableCode === 'MODE_DISABLED';
+  const suspended = unavailableCode === 'MEALS_SUSPENDED';
   const [busy, setBusy] = useState(false);
   // The confirmation in flight is tracked per intent so a double tap or a retry
   // cannot fire two charges, and a refresh can recover the same result.
@@ -94,7 +98,8 @@ function SelfServicePage({ session, employee, onExpired, onForced }: {
       const current = await api.openSelfService(session);
       if (current.intent_id) saveLastSelfServiceIntent(session, current.intent_id);
       setPreview(current);
-      setClosed(current.code === 'MODE_DISABLED');
+      setUnavailableCode(current.code || '');
+      setMessage(current.message || '');
       setPhase(current.status === 'READY' ? 'ready' : 'unavailable');
     } catch (reason) { handle(reason); }
     finally { setBusy(false); }
@@ -111,7 +116,7 @@ function SelfServicePage({ session, employee, onExpired, onForced }: {
         if (outcome.status === 'SUCCESS' && outcome.consumption) {
           setConsumption(outcome.consumption); setPhase('ready');
         } else if (outcome.status === 'REJECTED') {
-          setClosed(outcome.code === 'MODE_DISABLED');
+          setUnavailableCode(outcome.code || '');
           setPhase('unavailable'); setMessage(outcome.message || '消费未完成。');
         } else {
           void enter();
@@ -136,10 +141,12 @@ function SelfServicePage({ session, employee, onExpired, onForced }: {
         // The meal, price or count changed since the preview: show the updated
         // preview and let the employee decide again at the new values.
         setPreview(outcome.preview);
+        setUnavailableCode(outcome.preview.code || '');
+        if (outcome.preview.status !== 'READY') setMessage(outcome.preview.message || '');
         setPhase(outcome.preview.status === 'READY' ? 'ready' : 'unavailable');
         setNotice(outcome.message || '餐次信息已更新，请确认后再消费。');
       } else {
-        setClosed(outcome.code === 'MODE_DISABLED');
+        setUnavailableCode(outcome.code || '');
         setPhase('unavailable'); setMessage(outcome.message || '消费未完成。');
       }
     } catch (reason) { handle(reason); }
@@ -158,7 +165,7 @@ function SelfServicePage({ session, employee, onExpired, onForced }: {
       {consumption ? <SuccessPanel result={consumption} onAgain={consumeAgain}/>
         : phase === 'loading' ? <Loading text="正在读取本餐次信息"/>
         : phase === 'error' ? <div className="payment-outcome"><h2>暂时无法读取餐次</h2><p>{message}</p><button className="outline-button" type="button" onClick={() => void enter()} disabled={busy}>重试</button></div>
-        : phase === 'unavailable' ? <div className="payment-outcome"><h2>{closed ? '自助消费已关闭' : '当前无法自助消费'}</h2><p>{message || '当前不在用餐时段。'}</p>{closed ? <p className="subtle">食堂已关闭自助消费，请改用出示就餐码。关闭前已完成的消费和退款记录仍然可以查询。</p> : null}<button className="outline-button full" type="button" onClick={() => void enter()} disabled={busy}>重新检查</button></div>
+        : phase === 'unavailable' ? <div className="payment-outcome"><h2>{closed ? '自助消费已关闭' : suspended ? '食堂当前未开放供餐' : '当前无法自助消费'}</h2><p>{message || '当前不在用餐时段。'}</p>{closed ? <p className="subtle">食堂已关闭自助消费，请改用出示就餐码。关闭前已完成的消费和退款记录仍然可以查询。</p> : null}{suspended ? <p className="subtle">所有餐次都已暂停供应，请联系管理员开放后再来。</p> : null}<button className="outline-button full" type="button" onClick={() => void enter()} disabled={busy}>重新检查</button></div>
         : preview ? <PreviewPanel employee={employee} preview={preview} existing={existing} notice={notice} busy={busy} onConfirm={() => void confirm(preview.intent_id || '')}/>
         : <Loading text="正在读取本餐次信息"/>}
     </section>

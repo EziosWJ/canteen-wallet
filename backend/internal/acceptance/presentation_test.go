@@ -228,7 +228,8 @@ func TestNoActiveMealFailsWithoutCharging(t *testing.T) {
 	e.recharge(worker.id, 5000, "R-0001")
 
 	issued := e.issue(worker.session, "")
-	e.disableAllMeals()
+	// The period stays open for service; only its window has passed.
+	e.endMealNow(defaultMealCode)
 
 	result := e.scan(terminalCredential, issued.Token)
 	if result.Status != "FAILED" || result.Code != "NO_MEAL" {
@@ -246,6 +247,31 @@ func TestNoActiveMealFailsWithoutCharging(t *testing.T) {
 	replayed := e.scan(terminalCredential, issued.Token)
 	if replayed.Status != "FAILED" || replayed.Code != "NO_MEAL" {
 		t.Fatalf("rescan returned %s/%s, want the first FAILED/NO_MEAL", replayed.Status, replayed.Code)
+	}
+}
+
+// TestSuspendedMealsFailScan covers the other reason no meal resolves: every
+// period is suspended, so the terminal is told the canteen is not serving rather
+// than that the current window is empty.
+func TestSuspendedMealsFailScan(t *testing.T) {
+	e := newEnv(t)
+	e.activateMeal(defaultMealCode, defaultMealName, mealPrice, 30*time.Minute, 30*time.Minute)
+	worker := e.newEmployee("A010", "13800000010", "陈曦")
+	terminalCredential := e.terminal("terminal-1", "一号终端")
+	e.recharge(worker.id, 5000, "R-0001")
+
+	issued := e.issue(worker.session, "")
+	e.disableAllMeals()
+
+	result := e.scan(terminalCredential, issued.Token)
+	if result.Status != "FAILED" || result.Code != "MEALS_SUSPENDED" {
+		t.Fatalf("scan with every meal suspended returned %s/%s, want FAILED/MEALS_SUSPENDED", result.Status, result.Code)
+	}
+	if balance := e.balance(worker.id); balance != 5000 {
+		t.Fatalf("balance is %d after a rejected scan, want 5000", balance)
+	}
+	if len(e.transactions(worker.id, "CONSUME")) != 0 {
+		t.Fatal("a scan with every meal suspended produced a consumption flow")
 	}
 }
 
