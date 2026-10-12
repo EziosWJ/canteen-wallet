@@ -41,7 +41,7 @@ sudo docker compose -f deploy/compose.yaml start canteen-server
 
 在后端目录配置好 `CANTEEN_DB_PATH` 后，运行 `canteen-server create-admin <username>` 创建至少两名管理员。随后分别执行 `canteen-server enroll-admin-totp <username>`，把输出的 `otpauth://` URI 安全导入各管理员独立的验证器。该命令也用于丢失第二因素后的受审计恢复，执行时会撤销该管理员旧会话。保管 URI，不写入日志或仓库。
 
-在后台创建扫码终端，并配置 `CANTEEN_SERVER_URL` 与 `CANTEEN_TERMINAL_KEY`；服务端与 Agent 可分机运行。最简启动步骤见 [scan-agent.md](scan-agent.md)。CLI `canteen-server provision-terminal <id> <name>` 和凭据文件方式保留为备用。将扫码枪的 `/dev/input/eventX` 设为稳定的 `/dev/canteen-scanner` udev 路径，设置 `CANTEEN_SCANNER_MODE=evdev`，并给 canteen 用户读取该设备的权限；若设备仅提供 boot keyboard HID 报告，可改用 hidraw 路径和 `hidraw` 模式。终端屏浏览器打开 `http://127.0.0.1:8090/terminal`；浏览器只连接本地 Scan Agent，设备凭据不进入页面。
+在后台创建扫码终端，并配置 `CANTEEN_SERVER_URL` 与 `CANTEEN_TERMINAL_KEY`；服务端与 Agent 可分机运行。最简启动步骤见 [scan-agent.md](scan-agent.md)。CLI `canteen-server provision-terminal <id> <name>` 和凭据文件方式保留为备用。Agent 通过串口读取扫码枪：将扫码枪对应串口设为稳定的 `/dev/canteen-scanner` udev 路径（或使用 `/dev/serial/by-id/` 下的路径），给 canteen 用户读取该设备的权限（通常加入 `dialout` 组），并按扫码枪的实际参数设置 `CANTEEN_SCANNER_BAUD`；扫码枪须配置为 115200 8N1 并带帧结束后缀。终端屏浏览器打开 `http://127.0.0.1:8090/terminal`；浏览器只连接本地 Scan Agent，设备凭据不进入页面。
 
 如现场需要语音反馈，设置 `CANTEEN_TTS_COMMAND` 为已安装的语音程序绝对路径。复制两个 systemd unit 到 `/etc/systemd/system/` 后执行 `systemctl daemon-reload`，再启用并启动 `canteen-server.service` 与 `canteen-scan-agent.service`。服务日志可用 `journalctl -u canteen-server -u canteen-scan-agent` 查看。备份每小时检查一次；当日无完整备份时自动进行 SQLite 一致性快照。失败会写入 server 日志，需接入现场的日志告警。管理员也可在后台触发备份。每日保留 30 份，外部月度保留 12 份。
 

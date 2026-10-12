@@ -1,5 +1,5 @@
 [Unit]
-Description=Canteen Wallet USB Scan Agent
+Description=Canteen Wallet Scan Agent
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=canteen
 Group=canteen
-SupplementaryGroups=input
+SupplementaryGroups=dialout
 EnvironmentFile=/etc/canteen/canteen.env
 ExecStart=/opt/canteen/canteen-scan-agent
 Restart=always

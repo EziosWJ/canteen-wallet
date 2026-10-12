@@ -161,6 +161,12 @@ func TestTerminalConfigDownloadsHTTPAndHTTPSAndRejectsInvalidAddresses(t *testin
 		if !strings.Contains(string(response.body), "CANTEEN_SERVER_URL='"+strings.TrimRight(base, "/")+"'") || !strings.Contains(string(response.body), key) || response.header("Cache-Control") != "no-store" || !strings.Contains(response.header("Content-Disposition"), "attachment") {
 			t.Fatal("config download did not match the actual endpoint/key or was cacheable")
 		}
+		if !strings.Contains(string(response.body), "CANTEEN_SCANNER_DEVICE='/dev/ttyUSB0'") || !strings.Contains(string(response.body), "CANTEEN_SCANNER_BAUD='115200'") {
+			t.Fatal("config download does not name a serial scanner path and baud rate")
+		}
+		if strings.Contains(string(response.body), "CANTEEN_SCANNER_MODE") {
+			t.Fatal("config download still configures the removed scanner mode")
+		}
 	}
 	for _, base := range []string{"", "ftp://host", "http://user:password@host", "http://host?key=secret", "http://host/#fragment", "http://host/\nBAD=value"} {
 		e.get(e.public.URL, "/api/admin/terminals/"+item.ID+"/config?server_url="+url.QueryEscape(base), e.adminToken).expect(t, http.StatusBadRequest, nil)

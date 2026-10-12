@@ -78,7 +78,7 @@ export default function Terminal() {
     <div className={`terminal-grid ${isWaiting ? 'waiting-layout' : ''}`}>
       <section className={`terminal-result ${state.kind}`} aria-live="polite">
         <div className="terminal-result-top"><span className={`terminal-state-pill ${state.kind}`}>{isWaiting ? '等待扫码' : state.kind === 'confirm' ? '需要确认' : state.kind === 'success' ? '交易完成' : '未完成'}</span><time>{time(event?.occurred_at || event?.created_at)}</time></div>
-        {isWaiting ? <div className="terminal-wait"><img src="/assets/ui/scan-frame.png" alt="扫码等待提示"/><div><h1>{!online ? '正在连接终端服务' : data?.status === 'OFFLINE' ? '终端设备离线' : '请出示动态就餐码'}</h1><p>{data?.status === 'OFFLINE' ? '请检查扫码枪和 Scan Agent 连接' : '由 USB 扫码枪读取手机屏幕上的就餐码'}</p></div></div> : <>
+        {isWaiting ? <div className="terminal-wait"><img src="/assets/ui/scan-frame.png" alt="扫码等待提示"/><div><h1>{!online ? '正在连接终端服务' : data?.status === 'OFFLINE' ? '终端设备离线' : '请出示动态就餐码'}</h1><p>{data?.status === 'OFFLINE' ? '请检查扫码枪和 Scan Agent 连接' : '由扫码枪读取手机屏幕上的就餐码'}</p></div></div> : <>
           <div className="terminal-status-icon">{state.kind === 'success' ? <img src="/assets/ui/success-illustration.png" alt=""/> : <span aria-hidden="true">{state.kind === 'confirm' ? '!' : '×'}</span>}</div>
           <h1>{state.title}</h1><p className="terminal-detail">{event?.duplicate_trigger ? '重复扫码，已返回首次结果' : event?.replayed ? '此码已处理，显示原结果' : event?.message || state.detail}</p>
           <div className="terminal-identity"><span className="terminal-avatar" aria-hidden="true">{event?.employee_name?.slice(0, 1) || '员'}</span><div><strong>{event?.employee_name || '员工身份待确认'}</strong><small>{event?.employee_no || '仅用于本次核销提示'}</small></div></div>

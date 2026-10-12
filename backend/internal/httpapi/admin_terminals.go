@@ -111,7 +111,7 @@ func adminTerminalRoutes(admin *http.ServeMux, db *sql.DB) {
 			}
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Content-Disposition", `attachment; filename="terminal.env"`)
-			fmt.Fprintf(w, "CANTEEN_SERVER_URL=%s\nCANTEEN_TERMINAL_KEY=%s\n# Set the scanner path on the agent machine.\nCANTEEN_SCANNER_DEVICE='/dev/input/eventX'\nCANTEEN_SCANNER_MODE='evdev'\n", shellValue(strings.TrimRight(base, "/")), shellValue(key))
+			fmt.Fprintf(w, "CANTEEN_SERVER_URL=%s\nCANTEEN_TERMINAL_KEY=%s\n# Set the scanner path on the agent machine, for example /dev/ttyUSB0 or a stable /dev/serial/by-id path.\nCANTEEN_SCANNER_DEVICE='/dev/ttyUSB0'\nCANTEEN_SCANNER_BAUD='115200'\n", shellValue(strings.TrimRight(base, "/")), shellValue(key))
 		default:
 			notFound(w, r)
 		}
