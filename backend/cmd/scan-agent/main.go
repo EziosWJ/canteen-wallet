@@ -5,7 +5,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,7 +82,7 @@ func run(logger *slog.Logger) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go a.readScanner(ctx, cfg.device)
+	go a.readSerial(ctx, cfg)
 	go a.heartbeat(ctx)
 	go a.resumePending(ctx)
 	proxy := httputil.NewSingleHostReverseProxy(publicURL)
@@ -108,170 +107,8 @@ func run(logger *slog.Logger) error {
 		proxy.ServeHTTP(w, r)
 	})
 	server := &http.Server{Addr: env("CANTEEN_DISPLAY_ADDR", "127.0.0.1:8090"), Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	logger.Info("scan agent started", "display_addr", server.Addr, "scanner_device", cfg.device)
+	logger.Info("scan agent started", "display_addr", server.Addr, "scanner_device", cfg.device, "scanner_baud", cfg.baud, "scanner_terminator", cfg.terminator.String(), "scanner_idle_ms", cfg.idle.Milliseconds())
 	return server.ListenAndServe()
-}
-
-func (a *agent) readScanner(ctx context.Context, path string) {
-	mode := env("CANTEEN_SCANNER_MODE", "")
-	if mode == "" {
-		if strings.Contains(path, "/event") {
-			mode = "evdev"
-		} else {
-			mode = "hidraw"
-		}
-	}
-	for ctx.Err() == nil {
-		file, err := os.Open(path)
-		if err != nil {
-			a.setScanner("OFFLINE")
-			a.logger.Warn("scanner unavailable", "error", err)
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		a.setScanner("READY")
-		if mode == "evdev" {
-			a.readEvdev(ctx, file)
-			file.Close()
-			a.setScanner("OFFLINE")
-			time.Sleep(time.Second)
-			continue
-		}
-		buffer := make([]byte, 8)
-		var previous [6]byte
-		var token strings.Builder
-		for ctx.Err() == nil {
-			_, err := io.ReadFull(file, buffer)
-			if err != nil {
-				break
-			}
-			var current [6]byte
-			copy(current[:], buffer[2:8])
-			for _, key := range current {
-				if key == 0 || contains(previous[:], key) {
-					continue
-				}
-				if key == 40 {
-					value := token.String()
-					token.Reset()
-					if value != "" {
-						a.processScan(ctx, value)
-					}
-					continue
-				}
-				if char := hidChar(key, buffer[0]&0x22 != 0); char != 0 && token.Len() < 128 {
-					token.WriteByte(char)
-				}
-			}
-			previous = current
-		}
-		file.Close()
-		a.setScanner("OFFLINE")
-		time.Sleep(time.Second)
-	}
-}
-
-func (a *agent) readEvdev(ctx context.Context, file *os.File) {
-	var token strings.Builder
-	shift := false
-	buffer := make([]byte, 24) // Linux input_event on the supported amd64 host.
-	for ctx.Err() == nil {
-		if _, err := io.ReadFull(file, buffer); err != nil {
-			return
-		}
-		if binary.LittleEndian.Uint16(buffer[16:18]) != 1 {
-			continue
-		} // EV_KEY
-		key := binary.LittleEndian.Uint16(buffer[18:20])
-		value := binary.LittleEndian.Uint32(buffer[20:24])
-		if key == 42 || key == 54 {
-			shift = value != 0
-			continue
-		}
-		if value != 1 {
-			continue
-		}
-		if key == 28 {
-			value := token.String()
-			token.Reset()
-			if value != "" {
-				a.processScan(ctx, value)
-			}
-			continue
-		}
-		if char := eventChar(key, shift); char != 0 && token.Len() < 128 {
-			token.WriteByte(char)
-		}
-	}
-}
-
-func eventChar(key uint16, shift bool) byte {
-	const letterKeys = "\x1e\x30\x2e\x20\x12\x21\x22\x23\x17\x24\x25\x26\x32\x31\x18\x19\x10\x13\x1f\x14\x16\x2f\x11\x2d\x15\x2c"
-	for index := 0; index < len(letterKeys); index++ {
-		if uint16(letterKeys[index]) == key {
-			char := byte('a' + index)
-			if shift {
-				char -= 'a' - 'A'
-			}
-			return char
-		}
-	}
-	if key >= 2 && key <= 10 {
-		if shift {
-			return "!@#$%^&*("[key-2]
-		}
-		return byte('1' + key - 2)
-	}
-	if key == 11 {
-		if shift {
-			return ')'
-		}
-		return '0'
-	}
-	if key == 12 {
-		if shift {
-			return '_'
-		}
-		return '-'
-	}
-	return 0
-}
-
-func hidChar(key byte, shift bool) byte {
-	if key >= 4 && key <= 29 {
-		char := byte('a' + key - 4)
-		if shift {
-			char -= 'a' - 'A'
-		}
-		return char
-	}
-	if key >= 30 && key <= 38 {
-		if shift {
-			return "!@#$%^&*("[key-30]
-		}
-		return byte('1' + key - 30)
-	}
-	if key == 39 {
-		if shift {
-			return ')'
-		}
-		return '0'
-	}
-	if key == 45 {
-		if shift {
-			return '_'
-		}
-		return '-'
-	}
-	return 0
-}
-func contains(keys []byte, key byte) bool {
-	for _, item := range keys {
-		if item == key {
-			return true
-		}
-	}
-	return false
 }
 
 func (a *agent) processScan(ctx context.Context, token string) {

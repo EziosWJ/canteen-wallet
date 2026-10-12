@@ -11,17 +11,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func clearAgentEnvironment(t *testing.T) string {
 	t.Helper()
-	for _, name := range []string{"CANTEEN_SERVER_URL", "CANTEEN_INTERNAL_URL", "CANTEEN_PUBLIC_URL", "CANTEEN_TERMINAL_KEY", "CANTEEN_TERMINAL_CREDENTIAL_FILE", "CANTEEN_SCANNER_DEVICE"} {
+	for _, name := range []string{"CANTEEN_SERVER_URL", "CANTEEN_INTERNAL_URL", "CANTEEN_PUBLIC_URL", "CANTEEN_TERMINAL_KEY", "CANTEEN_TERMINAL_CREDENTIAL_FILE", "CANTEEN_SCANNER_DEVICE", "CANTEEN_SCANNER_MODE", "CANTEEN_SCANNER_BAUD", "CANTEEN_SCANNER_TERMINATOR", "CANTEEN_SCANNER_IDLE_MS"} {
 		t.Setenv(name, "")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("CANTEEN_SCANNER_DEVICE", "/dev/input/event-test")
+	t.Setenv("CANTEEN_SCANNER_DEVICE", "/dev/ttyUSB0")
 	return "trm_" + base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 }
 
@@ -102,5 +103,83 @@ func TestInvalidAgentConfigurationFailsWithoutDisclosingSecrets(t *testing.T) {
 		if err == nil || strings.Contains(err.Error(), "bad-secret") {
 			t.Fatal("invalid key was accepted or disclosed")
 		}
+	}
+}
+
+func TestScannerSerialParametersDefaultToTheContractedValues(t *testing.T) {
+	key := clearAgentEnvironment(t)
+	t.Setenv("CANTEEN_TERMINAL_KEY", key)
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.device != "/dev/ttyUSB0" || cfg.baud != 115200 || cfg.terminator != terminatorAny || cfg.idle != 50*time.Millisecond {
+		t.Fatalf("defaults changed: device=%s baud=%d terminator=%s idle=%s", cfg.device, cfg.baud, cfg.terminator, cfg.idle)
+	}
+}
+
+func TestScannerSerialParametersAreConfigurable(t *testing.T) {
+	key := clearAgentEnvironment(t)
+	t.Setenv("CANTEEN_TERMINAL_KEY", key)
+	t.Setenv("CANTEEN_SCANNER_BAUD", "9600")
+	t.Setenv("CANTEEN_SCANNER_TERMINATOR", "cr")
+	t.Setenv("CANTEEN_SCANNER_IDLE_MS", "120")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.baud != 9600 || cfg.terminator != terminatorCR || cfg.idle != 120*time.Millisecond {
+		t.Fatalf("configured values ignored: baud=%d terminator=%s idle=%s", cfg.baud, cfg.terminator, cfg.idle)
+	}
+}
+
+// A wrong baud rate shows up as mojibake rather than as an error, so an unusable
+// value has to fail at startup instead of silently falling back to a default.
+func TestInvalidScannerSerialParametersFailAtStartup(t *testing.T) {
+	key := clearAgentEnvironment(t)
+	t.Setenv("CANTEEN_TERMINAL_KEY", key)
+	cases := []struct{ variable, value string }{
+		{"CANTEEN_SCANNER_BAUD", "4800"},
+		{"CANTEEN_SCANNER_BAUD", "1152000"},
+		{"CANTEEN_SCANNER_BAUD", "fast"},
+		{"CANTEEN_SCANNER_TERMINATOR", "crlf"},
+		{"CANTEEN_SCANNER_TERMINATOR", "tab"},
+		{"CANTEEN_SCANNER_IDLE_MS", "9"},
+		{"CANTEEN_SCANNER_IDLE_MS", "501"},
+		{"CANTEEN_SCANNER_IDLE_MS", "soon"},
+	}
+	for _, item := range cases {
+		t.Run(item.variable+"="+item.value, func(t *testing.T) {
+			t.Setenv(item.variable, item.value)
+			_, err := loadConfig()
+			if err == nil {
+				t.Fatalf("accepted %s=%s", item.variable, item.value)
+			}
+			if !strings.Contains(err.Error(), item.variable) {
+				t.Fatalf("error does not name %s: %v", item.variable, err)
+			}
+		})
+	}
+}
+
+// The removed device modes must end in a clear notice rather than in a puzzling
+// serial port error.
+func TestRemovedScannerModeVariableFailsWithNotice(t *testing.T) {
+	key := clearAgentEnvironment(t)
+	t.Setenv("CANTEEN_TERMINAL_KEY", key)
+	for _, mode := range []string{"evdev", "hidraw"} {
+		t.Setenv("CANTEEN_SCANNER_MODE", mode)
+		_, err := loadConfig()
+		if err == nil {
+			t.Fatalf("accepted the removed scanner mode %q", mode)
+		}
+		if !strings.Contains(err.Error(), "CANTEEN_SCANNER_MODE") || !strings.Contains(err.Error(), "removed") {
+			t.Fatalf("removal notice is unclear: %v", err)
+		}
+	}
+	// An empty value carries no mode and must not block startup.
+	t.Setenv("CANTEEN_SCANNER_MODE", "")
+	if _, err := loadConfig(); err != nil {
+		t.Fatalf("empty scanner mode blocked startup: %v", err)
 	}
 }
