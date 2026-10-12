@@ -18,4 +18,6 @@ status: accepted
 
 Linux Agent 的目标配置是服务端地址、终端 key 和扫码设备，通过环境变量启动，保留现有设备模式与本地显示配置能力；支持直接通过环境变量提供 key，原凭据文件方式可兼容保留。统一地址与直接 key 分别使用 `CANTEEN_SERVER_URL` 和 `CANTEEN_TERMINAL_KEY`，优先于对应旧配置；新变量非法时明确报错。原双地址与凭据文件方式保留兼容。
 
+> 扫码代理的扫码设备接口由 [ADR-0007](0007-serial-scanner-only-agent.md) 更新：只保留串口设备模式，移除 evdev 与 hidraw 两种模式及 `CANTEEN_SCANNER_MODE`。
+
 用户已确认完整方案，并通过 SPEC-007（GitHub #56）授权实施。启动方式见 [最简部署文档](../../deploy/scan-agent.md)。
