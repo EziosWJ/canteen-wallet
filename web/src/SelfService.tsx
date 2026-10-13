@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, ApiError, clearLastSelfServiceIntent, clearSession, readLastSelfServiceIntent, readSession, saveLastSelfServiceIntent,
+import { api, ApiError, clearLastSelfServiceIntent, clearSession, EMPLOYEE_SESSION_KEY, readLastSelfServiceIntent, readSession, saveLastSelfServiceIntent,
   type ConsumptionResult, type Employee, type SelfServiceOutcome, type SelfServicePreview, type Session } from './api';
 import { Login, PasswordChange, Brand, messageFor } from './Auth';
 
@@ -50,6 +50,21 @@ export default function SelfService() {
     }).finally(() => { if (!cancelled) setBooting(false); });
     return () => { cancelled = true; };
   }, [session?.access_token, expire]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The fixed link is commonly opened in a second tab. Keep this page aligned
+  // with login, logout, expiry, and session replacement performed elsewhere in
+  // the same browser origin.
+  useEffect(() => {
+    const reconcile = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== EMPLOYEE_SESSION_KEY) return;
+      const next = readSession();
+      if (next?.access_token === session?.access_token) return;
+      if (!next) { expire(); return; }
+      setSession(next); setEmployee(null); setForced(next.must_change_password); setBooting(true);
+    };
+    window.addEventListener('storage', reconcile);
+    return () => window.removeEventListener('storage', reconcile);
+  }, [session?.access_token, expire]);
 
   if (!session) return <Login onLogin={next => { setSession(next); setBooting(true); setForced(next.must_change_password); }}/>;
   if (booting) return <main className="simple-page"><header className="simple-header"><Brand/></header><Loading text="正在读取账户信息"/></main>;

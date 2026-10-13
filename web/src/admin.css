@@ -59,6 +59,31 @@
 }
 @media(prefers-reduced-motion:reduce){.admin-nav-link,.admin-nav-group-title,.admin-nav-group-title::after{transition:none}}
 
+.self-service-qr-layout{display:grid;grid-template-columns:minmax(260px,360px) minmax(0,1fr);gap:28px;align-items:start}
+.self-service-qr-print-card{display:grid;justify-items:center;gap:10px;padding:24px 22px;border:1px solid #dcebf3;border-radius:17px;background:linear-gradient(180deg,#f5fbff,#f1fbf8);text-align:center}
+.self-service-qr-brand{margin:0;color:#1685c9;font-size:13px;font-weight:850;letter-spacing:.08em}
+.self-service-qr-print-card h3,.self-service-qr-details h3{margin:0;color:#234866;font-size:20px}
+.self-service-qr-image{display:block;width:min(100%,300px);aspect-ratio:1;object-fit:contain;padding:10px;border:1px solid #e4edf3;border-radius:12px;background:#fff;image-rendering:pixelated}
+.self-service-qr-placeholder{display:grid;place-items:center;width:min(100%,300px);aspect-ratio:1;border:1px dashed #bcd3e1;border-radius:12px;background:#fff;color:#71869a;font-size:13px}
+.self-service-qr-url{max-width:100%;margin:0;color:#294b66;font:600 12px/1.5 ui-monospace,"SFMono-Regular",Menlo,monospace;overflow-wrap:anywhere}
+.self-service-qr-instruction{max-width:320px;margin:0;color:#58758c;font-size:13px;line-height:1.65}
+.self-service-qr-details{display:grid;gap:14px;min-width:0}
+.self-service-qr-details>h3{font-size:18px}
+.self-service-qr-link-form{display:grid;gap:10px}
+.self-service-qr-link-field{display:grid;gap:7px;color:#526c81;font-size:13px;font-weight:750}
+.self-service-qr-link-field input{box-sizing:border-box;width:100%;min-height:43px;border:1px solid #d9e6ef;border-radius:10px;background:#fff;padding:9px 11px;color:#294b66;font:13px ui-monospace,"SFMono-Regular",Menlo,monospace}
+.self-service-qr-note{margin-top:0}
+@media(max-width:700px){.self-service-qr-layout{grid-template-columns:1fr}.self-service-qr-print-card{max-width:360px;margin:auto;width:100%;box-sizing:border-box}}
+@media print{
+  body *{visibility:hidden!important}
+  .self-service-qr-page,.self-service-qr-page *{visibility:visible!important}
+  .self-service-qr-page{position:absolute;inset:0;padding:0}
+  .self-service-qr-layout{display:block}
+  .self-service-qr-print-card{max-width:420px;margin:20mm auto;border:0;box-shadow:none;background:#fff}
+  .self-service-qr-details,.self-service-qr-warning,.self-service-qr-actions,.self-service-qr-note{display:none!important}
+  .self-service-qr-image{width:300px}
+}
+
 /* Shared employee search keeps the identity and account context visible at
    every point where an administrator can change money. */
 .admin-employee-picker{position:relative;flex:1 1 100%;min-width:0}

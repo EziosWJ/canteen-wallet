@@ -111,11 +111,15 @@ export class ApiError extends Error {
   }
 }
 
-const SESSION_KEY = 'canteen-employee-session';
+// Employee authentication is origin-scoped deliberately: a fixed self-service
+// link normally opens in a new tab, and that tab must be able to reuse the
+// employee's existing session. The storage event for this key is also the
+// cross-tab logout/session-replacement signal.
+export const EMPLOYEE_SESSION_KEY = 'canteen-employee-session';
 
 export function readSession(): Session | null {
   try {
-    const raw = sessionStorage.getItem(SESSION_KEY);
+    const raw = localStorage.getItem(EMPLOYEE_SESSION_KEY);
     if (!raw) return null;
     const session = JSON.parse(raw) as Session;
     if (!session.access_token || Date.parse(session.expires_at) <= Date.now()) {
@@ -132,18 +136,18 @@ export function readSession(): Session | null {
 export function saveSession(session: Session): void {
   const previous = readStoredSession();
   if (previous && previous.access_token !== session.access_token) clearPaymentCache(previous);
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  localStorage.setItem(EMPLOYEE_SESSION_KEY, JSON.stringify(session));
 }
 
 export function clearSession(): void {
   const session = readStoredSession();
   if (session) clearPaymentCache(session);
-  sessionStorage.removeItem(SESSION_KEY);
+  localStorage.removeItem(EMPLOYEE_SESSION_KEY);
 }
 
 function readStoredSession(): Session | null {
   try {
-    const raw = sessionStorage.getItem(SESSION_KEY);
+    const raw = localStorage.getItem(EMPLOYEE_SESSION_KEY);
     return raw ? JSON.parse(raw) as Session : null;
   } catch { return null; }
 }

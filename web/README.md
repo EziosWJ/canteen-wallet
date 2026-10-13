@@ -12,7 +12,7 @@ task dev:backend
 
 另开终端运行 `task dev:web` 并打开 Vite 打印的地址。开发服务器将 `/api` 和 `/healthz` 代理到 Go 公共服务。若公共服务改用其他端口，可在启动 Vite 时设置 `CANTEEN_WEB_API_TARGET`，例如 `CANTEEN_WEB_API_TARGET=http://127.0.0.1:8090 task dev:web`。
 
-单独编译前端可运行 `task web:build`。生产构建运行 `task build`；这会将 Vite 产物嵌入 Go Server 二进制。使用 `task run` 构建并运行服务，页面与 `/api` 由同一公开监听提供。员工会话仅保存在浏览器当前标签页的 `sessionStorage` 中；退出时会请求撤销服务端会话并清除本地会话。就餐码仅在就餐码页面内存中保留，页面离开后销毁。
+单独编译前端可运行 `task web:build`。生产构建运行 `task build`；这会将 Vite 产物嵌入 Go Server 二进制。使用 `task run` 构建并运行服务，页面与 `/api` 由同一公开监听提供。员工会话保存在当前站点的 `localStorage` 中，因此固定自助消费链接在同一浏览器的新标签页可以复用会话；登录、退出、会话替换和过期会通过浏览器存储事件同步到其他标签页。就餐码缓存和自助消费结果仍按各自流程保存，退出时会清除关联的本地数据。
 
 ## 页面与接口
 

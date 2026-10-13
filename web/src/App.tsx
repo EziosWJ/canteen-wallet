@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { api, ApiError, clearSession, readSession, type Employee, type MealPeriod, type Session, type Transaction } from './api';
+import { api, ApiError, clearSession, EMPLOYEE_SESSION_KEY, readSession, type Employee, type MealPeriod, type Session, type Transaction } from './api';
 import PaymentCode from './PaymentCode';
 import { useConsumptionModes } from './modes';
 import { Brand, Login, PasswordChange, messageFor } from './Auth';
@@ -164,6 +164,23 @@ export default function App() {
     document.addEventListener('visibilitychange', checkSession);
     return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', checkSession); };
   }, [session, expire]);
+
+  // Employee authentication is shared by tabs. A logout or a later login in
+  // another tab must replace this tab's local state as well as its bearer
+  // token, otherwise the UI could continue showing stale employee data.
+  useEffect(() => {
+    const reconcile = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== EMPLOYEE_SESSION_KEY) return;
+      const next = readSession();
+      if (next?.access_token === sessionRef.current?.access_token) return;
+      if (!next) { expire(); return; }
+      setSession(next);
+      setEmployee(null); setAccount(null); setLedger(initialLedger); setMeals(initialMeals);
+      setForced(next.must_change_password); setChanging(false); setBooting(true); setPage('home');
+    };
+    window.addEventListener('storage', reconcile);
+    return () => window.removeEventListener('storage', reconcile);
+  }, [expire]);
 
   const loadLedger = useCallback(async (cursor?: string) => {
     if (!session) return;
