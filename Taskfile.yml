@@ -17,6 +17,27 @@ tasks:
       - task: build
       - cd backend && CANTEEN_PUBLIC_ADDR="${CANTEEN_PUBLIC_ADDR:-0.0.0.0:5001}" ../build/canteen-server
 
+  agent:build:
+    desc: 编译 Linux 扫码代理
+    dir: backend
+    cmds:
+      - mkdir -p ../build
+      - go build -o ../build/canteen-scan-agent ./cmd/scan-agent
+
+  agent:run:
+    desc: 编译并加载项目根目录 terminal.env 启动扫码代理
+    dir: '{{.ROOT_DIR}}'
+    preconditions:
+      - sh: test -r terminal.env
+        msg: 请先在项目根目录准备 terminal.env 扫码代理配置
+    cmds:
+      - task: agent:build
+      - |
+        set -a
+        . ./terminal.env
+        set +a
+        exec ./build/canteen-scan-agent
+
   web:install:
     desc: 安装前端锁定依赖
     dir: web

@@ -158,12 +158,53 @@ func TestTerminalConfigDownloadsHTTPAndHTTPSAndRejectsInvalidAddresses(t *testin
 	key := e.terminalKey(item.ID)
 	for _, base := range []string{"http://192.168.1.10:5001", "https://canteen.example.com/prefix/"} {
 		response := e.get(e.public.URL, "/api/admin/terminals/"+item.ID+"/config?server_url="+url.QueryEscape(base), e.adminToken).expect(t, http.StatusOK, nil)
+		for _, line := range []string{"CANTEEN_SCANNER_DEVICE='/dev/ttyACM0'\n", "CANTEEN_SCANNER_MODE='serial'\n", "CANTEEN_SCANNER_BAUD='9600'\n"} {
+			if !strings.Contains(string(response.body), line) {
+				t.Fatalf("downloaded config is missing serial scanner setting %q", line)
+			}
+		}
 		if !strings.Contains(string(response.body), "CANTEEN_SERVER_URL='"+strings.TrimRight(base, "/")+"'") || !strings.Contains(string(response.body), key) || response.header("Cache-Control") != "no-store" || !strings.Contains(response.header("Content-Disposition"), "attachment") {
 			t.Fatal("config download did not match the actual endpoint/key or was cacheable")
 		}
 	}
 	for _, base := range []string{"", "ftp://host", "http://user:password@host", "http://host?key=secret", "http://host/#fragment", "http://host/\nBAD=value"} {
 		e.get(e.public.URL, "/api/admin/terminals/"+item.ID+"/config?server_url="+url.QueryEscape(base), e.adminToken).expect(t, http.StatusBadRequest, nil)
+	}
+}
+
+func TestTerminalConfigDownloadsSelectedScannerSettings(t *testing.T) {
+	e := newEnv(t)
+	item := e.createTerminal("串口配置终端")
+	for _, tc := range []struct{ mode, device, baud string }{
+		{"serial", "/dev/ttyUSB1", "115200"},
+		{"serial", "/dev/scanner's-port", "19200"},
+		{"evdev", "/dev/input/event7", ""},
+		{"hidraw", "/dev/hidraw2", ""},
+	} {
+		query := url.Values{"server_url": {"http://localhost:5001"}, "scanner_mode": {tc.mode}, "scanner_device": {tc.device}, "scanner_baud": {tc.baud}}
+		response := e.get(e.public.URL, "/api/admin/terminals/"+item.ID+"/config?"+query.Encode(), e.adminToken).expect(t, http.StatusOK, nil)
+		body := string(response.body)
+		quotedDevice := "'" + strings.ReplaceAll(tc.device, "'", "'\"'\"'") + "'"
+		if !strings.Contains(body, "CANTEEN_SCANNER_MODE='"+tc.mode+"'\n") || !strings.Contains(body, "CANTEEN_SCANNER_DEVICE="+quotedDevice+"\n") {
+			t.Fatal("download ignored selected scanner mode or device")
+		}
+		if tc.mode == "serial" {
+			if !strings.Contains(body, "CANTEEN_SCANNER_BAUD='"+tc.baud+"'\n") {
+				t.Fatal("download ignored selected baud rate")
+			}
+		} else if strings.Contains(body, "CANTEEN_SCANNER_BAUD=") {
+			t.Fatal("non-serial config contains baud rate")
+		}
+	}
+	for _, query := range []url.Values{
+		{"scanner_mode": {"unknown"}},
+		{"scanner_device": {"/dev/ttyACM0\nBAD=value"}},
+		{"scanner_device": {"relative-path"}},
+		{"scanner_baud": {"unsupported"}},
+		{"scanner_baud": {"0"}},
+	} {
+		query.Set("server_url", "http://localhost:5001")
+		e.get(e.public.URL, "/api/admin/terminals/"+item.ID+"/config?"+query.Encode(), e.adminToken).expect(t, http.StatusBadRequest, nil)
 	}
 }
 

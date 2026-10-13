@@ -15,7 +15,7 @@ import (
 
 func clearAgentEnvironment(t *testing.T) string {
 	t.Helper()
-	for _, name := range []string{"CANTEEN_SERVER_URL", "CANTEEN_INTERNAL_URL", "CANTEEN_PUBLIC_URL", "CANTEEN_TERMINAL_KEY", "CANTEEN_TERMINAL_CREDENTIAL_FILE", "CANTEEN_SCANNER_DEVICE"} {
+	for _, name := range []string{"CANTEEN_SERVER_URL", "CANTEEN_INTERNAL_URL", "CANTEEN_PUBLIC_URL", "CANTEEN_TERMINAL_KEY", "CANTEEN_TERMINAL_CREDENTIAL_FILE", "CANTEEN_SCANNER_DEVICE", "CANTEEN_SCANNER_MODE", "CANTEEN_SCANNER_BAUD"} {
 		t.Setenv(name, "")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -23,6 +23,42 @@ func clearAgentEnvironment(t *testing.T) string {
 	}
 	t.Setenv("CANTEEN_SCANNER_DEVICE", "/dev/input/event-test")
 	return "trm_" + base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+}
+
+func TestInvalidScannerConfigurationFailsAtStartup(t *testing.T) {
+	key := clearAgentEnvironment(t)
+	t.Setenv("CANTEEN_TERMINAL_KEY", key)
+	t.Setenv("CANTEEN_SCANNER_DEVICE", "/dev/ttyACM0")
+	for _, tc := range []struct{ mode, baud string }{{"unknown", "9600"}, {"serial", "invalid"}, {"serial", "0"}} {
+		t.Setenv("CANTEEN_SCANNER_MODE", tc.mode)
+		t.Setenv("CANTEEN_SCANNER_BAUD", tc.baud)
+		if _, err := loadConfig(); err == nil {
+			t.Fatal("invalid scanner configuration was silently accepted")
+		}
+	}
+}
+
+func TestScannerModeInferenceAndExplicitStableAlias(t *testing.T) {
+	key := clearAgentEnvironment(t)
+	t.Setenv("CANTEEN_TERMINAL_KEY", key)
+	for _, tc := range []struct{ device, mode, want string }{
+		{"/dev/ttyACM0", "", "serial"},
+		{"/dev/ttyUSB1", "", "serial"},
+		{"/dev/ttyS0", "", "serial"},
+		{"/dev/input/event7", "", "evdev"},
+		{"/dev/hidraw2", "", "hidraw"},
+		{"/dev/canteen-scanner", "serial", "serial"},
+	} {
+		t.Setenv("CANTEEN_SCANNER_DEVICE", tc.device)
+		t.Setenv("CANTEEN_SCANNER_MODE", tc.mode)
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.scanner.Mode != tc.want || cfg.scanner.Device != tc.device || cfg.scanner.Baud != 9600 {
+			t.Fatalf("unexpected scanner configuration: %+v", cfg.scanner)
+		}
+	}
 }
 
 func TestUnifiedConfigurationSendsAuthenticatedScanOverHTTPAndHTTPS(t *testing.T) {

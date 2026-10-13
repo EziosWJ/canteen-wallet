@@ -8,16 +8,25 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/EziosWJ/canteen-wallet/backend/internal/scanner"
 )
 
 type agentConfig struct {
-	device, credential, internal, public string
+	credential, internal, public string
+	scanner                      scanner.Config
 }
 
 func loadConfig() (agentConfig, error) {
-	cfg := agentConfig{device: os.Getenv("CANTEEN_SCANNER_DEVICE")}
-	if cfg.device == "" {
+	var cfg agentConfig
+	device := os.Getenv("CANTEEN_SCANNER_DEVICE")
+	if device == "" {
 		return cfg, errors.New("CANTEEN_SCANNER_DEVICE is required")
+	}
+	var err error
+	cfg.scanner, err = scanner.Parse(device, os.Getenv("CANTEEN_SCANNER_MODE"), os.Getenv("CANTEEN_SCANNER_BAUD"))
+	if err != nil {
+		return cfg, err
 	}
 	if key, present := os.LookupEnv("CANTEEN_TERMINAL_KEY"); present {
 		cfg.credential = strings.TrimSpace(key)

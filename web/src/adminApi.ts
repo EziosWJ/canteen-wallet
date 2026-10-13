@@ -185,8 +185,10 @@ export const adminApi = {
   resetTerminalKey(session: AdminSession, id: string) {
     return request<{ key: string }>(`/api/admin/terminals/${encodeURIComponent(id)}/reset-key`, session, { method: 'POST' });
   },
-  terminalConfig(session: AdminSession, id: string, serverURL: string) {
-    return request<Blob>(`/api/admin/terminals/${encodeURIComponent(id)}/config?${new URLSearchParams({ server_url: serverURL })}`, session);
+  terminalConfig(session: AdminSession, id: string, serverURL: string, scanner: { mode: string; device: string; baud: string }) {
+    const query = new URLSearchParams({ server_url: serverURL, scanner_mode: scanner.mode, scanner_device: scanner.device });
+    if (scanner.mode === 'serial') query.set('scanner_baud', scanner.baud);
+    return request<Blob>(`/api/admin/terminals/${encodeURIComponent(id)}/config?${query}`, session);
   },
   login(username: string, password: string, secondFactorCode: string) {
     return request<AdminSession>('/api/admin/login', null, { method: 'POST', body: JSON.stringify({ username, password, second_factor_code: secondFactorCode }) });

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/EziosWJ/canteen-wallet/backend/internal/scanner"
 	"github.com/EziosWJ/canteen-wallet/backend/internal/terminal"
 )
 
@@ -104,6 +105,19 @@ func adminTerminalRoutes(admin *http.ServeMux, db *sql.DB) {
 				WriteError(w, http.StatusBadRequest, CodeInvalidRequest, "valid HTTP or HTTPS server_url required")
 				return
 			}
+			mode := r.URL.Query().Get("scanner_mode")
+			if mode == "" {
+				mode = "serial"
+			}
+			device := r.URL.Query().Get("scanner_device")
+			if device == "" {
+				device = map[string]string{"serial": "/dev/ttyACM0", "evdev": "/dev/input/eventX", "hidraw": "/dev/hidrawX"}[mode]
+			}
+			cfg, err := scanner.Parse(device, mode, r.URL.Query().Get("scanner_baud"))
+			if err != nil {
+				WriteError(w, http.StatusBadRequest, CodeInvalidRequest, err.Error())
+				return
+			}
 			key, err := terminal.Credential(r.Context(), db, id)
 			if err != nil {
 				terminalManagementError(w, err)
@@ -111,7 +125,10 @@ func adminTerminalRoutes(admin *http.ServeMux, db *sql.DB) {
 			}
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Content-Disposition", `attachment; filename="terminal.env"`)
-			fmt.Fprintf(w, "CANTEEN_SERVER_URL=%s\nCANTEEN_TERMINAL_KEY=%s\n# Set the scanner path on the agent machine.\nCANTEEN_SCANNER_DEVICE='/dev/input/eventX'\nCANTEEN_SCANNER_MODE='evdev'\n", shellValue(strings.TrimRight(base, "/")), shellValue(key))
+			fmt.Fprintf(w, "CANTEEN_SERVER_URL=%s\nCANTEEN_TERMINAL_KEY=%s\n# Scanner settings on the agent machine.\nCANTEEN_SCANNER_DEVICE=%s\nCANTEEN_SCANNER_MODE=%s\n", shellValue(strings.TrimRight(base, "/")), shellValue(key), shellValue(cfg.Device), shellValue(cfg.Mode))
+			if cfg.Mode == "serial" {
+				fmt.Fprintf(w, "CANTEEN_SCANNER_BAUD='%d'\n", cfg.Baud)
+			}
 		default:
 			notFound(w, r)
 		}

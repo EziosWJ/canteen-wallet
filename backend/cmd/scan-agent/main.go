@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/EziosWJ/canteen-wallet/backend/internal/scanner"
 )
 
 type result struct {
@@ -83,7 +85,7 @@ func run(logger *slog.Logger) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go a.readScanner(ctx, cfg.device)
+	go a.readScanner(ctx, cfg.scanner)
 	go a.heartbeat(ctx)
 	go a.resumePending(ctx)
 	proxy := httputil.NewSingleHostReverseProxy(publicURL)
@@ -108,33 +110,41 @@ func run(logger *slog.Logger) error {
 		proxy.ServeHTTP(w, r)
 	})
 	server := &http.Server{Addr: env("CANTEEN_DISPLAY_ADDR", "127.0.0.1:8090"), Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	logger.Info("scan agent started", "display_addr", server.Addr, "scanner_device", cfg.device)
+	logger.Info("scan agent started", "display_addr", server.Addr, "scanner_device", cfg.scanner.Device, "scanner_mode", cfg.scanner.Mode)
 	return server.ListenAndServe()
 }
 
-func (a *agent) readScanner(ctx context.Context, path string) {
-	mode := env("CANTEEN_SCANNER_MODE", "")
-	if mode == "" {
-		if strings.Contains(path, "/event") {
-			mode = "evdev"
-		} else {
-			mode = "hidraw"
-		}
-	}
+func (a *agent) readScanner(ctx context.Context, cfg scanner.Config) {
 	for ctx.Err() == nil {
-		file, err := os.Open(path)
+		var file *os.File
+		var err error
+		if cfg.Mode == "serial" {
+			file, err = openSerial(cfg.Device, cfg.Baud)
+		} else {
+			file, err = os.Open(cfg.Device)
+		}
 		if err != nil {
 			a.setScanner("OFFLINE")
 			a.logger.Warn("scanner unavailable", "error", err)
-			time.Sleep(2 * time.Second)
+			if !scannerRetry(ctx, 2*time.Second) {
+				return
+			}
 			continue
 		}
+		stopClose := context.AfterFunc(ctx, func() { file.Close() })
 		a.setScanner("READY")
-		if mode == "evdev" {
-			a.readEvdev(ctx, file)
+		if cfg.Mode == "evdev" || cfg.Mode == "serial" {
+			if cfg.Mode == "serial" {
+				a.readSerial(ctx, file)
+			} else {
+				a.readEvdev(ctx, file)
+			}
+			stopClose()
 			file.Close()
 			a.setScanner("OFFLINE")
-			time.Sleep(time.Second)
+			if !scannerRetry(ctx, time.Second) {
+				return
+			}
 			continue
 		}
 		buffer := make([]byte, 8)
@@ -165,9 +175,23 @@ func (a *agent) readScanner(ctx context.Context, path string) {
 			}
 			previous = current
 		}
+		stopClose()
 		file.Close()
 		a.setScanner("OFFLINE")
-		time.Sleep(time.Second)
+		if !scannerRetry(ctx, time.Second) {
+			return
+		}
+	}
+}
+
+func scannerRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

@@ -565,6 +565,9 @@ function TerminalSettings({ session, terminal, onClose, onChanged, onUnauthorize
 }) {
   const [name, setName] = useState(terminal.name);
   const [serverURL, setServerURL] = useState(window.location.origin);
+  const [scannerMode, setScannerMode] = useState('serial');
+  const [scannerDevice, setScannerDevice] = useState('/dev/ttyACM0');
+  const [scannerBaud, setScannerBaud] = useState('9600');
   const [key, setKey] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -586,11 +589,11 @@ function TerminalSettings({ session, terminal, onClose, onChanged, onUnauthorize
     }
   }
   async function download() {
-    const file = await adminApi.terminalConfig(session, terminal.id, serverURL);
+    const file = await adminApi.terminalConfig(session, terminal.id, serverURL, { mode: scannerMode, device: scannerDevice, baud: scannerBaud });
     const url = URL.createObjectURL(file);
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'terminal.env'; anchor.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setNotice('配置已下载，请填写扫码设备路径后启动 Agent。');
+    setNotice('配置已下载，包含所选扫码设备设置。请在扫码机器加载配置并重启 Agent。');
   }
   return <Modal title={`管理扫码终端 · ${terminal.name}`} onClose={() => { if (!busy) onClose(); }}>
     <div className="admin-form">
@@ -610,7 +613,14 @@ function TerminalSettings({ session, terminal, onClose, onChanged, onUnauthorize
         {key && <button className="admin-secondary" type="button" disabled={busy} onClick={() => setKey('')}>隐藏 key</button>}
       </div>
       <label>服务端地址<input type="url" disabled={busy} value={serverURL} onChange={event => setServerURL(event.target.value)} placeholder="http://服务器:端口"/></label>
-      <button className="admin-secondary" type="button" disabled={busy || !terminal.credential_available || !serverURL} onClick={() => void perform(download)}>下载配置</button>
+      <label>扫码设备模式<select disabled={busy} value={scannerMode} onChange={event => {
+        const mode = event.target.value; setScannerMode(mode);
+        setScannerDevice({ serial: '/dev/ttyACM0', evdev: '/dev/input/eventX', hidraw: '/dev/hidrawX' }[mode] || '');
+      }}><option value="serial">串口（serial）</option><option value="evdev">键盘事件（evdev）</option><option value="hidraw">HID 报告（hidraw）</option></select></label>
+      <label>扫码设备路径<input disabled={busy} value={scannerDevice} onChange={event => setScannerDevice(event.target.value)} placeholder="例如 /dev/ttyACM0"/></label>
+      {scannerMode === 'serial' && <label>串口波特率<select disabled={busy} value={scannerBaud} onChange={event => setScannerBaud(event.target.value)}>{[1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400].map(baud => <option key={baud} value={baud}>{baud}</option>)}</select></label>}
+      <p className="admin-muted">设备路径填写扫码机器上的路径。{scannerMode === 'serial' ? '串口使用 8N1，波特率须与扫码枪一致；扫码结束须发送回车或换行。' : '请确认扫码枪支持所选模式。'}这些设置用于本次下载配置。</p>
+      <button className="admin-secondary" type="button" disabled={busy || !terminal.credential_available || !serverURL || !scannerDevice} onClick={() => void perform(download)}>下载配置</button>
       <div className="admin-form-actions">
         <button className="admin-secondary" type="button" disabled={busy} onClick={() => {
           if (!window.confirm('重置后旧 key 立即失效。需要更新 Agent 配置并重启，确定重置吗？')) return;
