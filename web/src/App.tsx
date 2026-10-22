@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { api, ApiError, clearSession, EMPLOYEE_SESSION_KEY, readSession, type Employee, type MealPeriod, type Session, type Transaction } from './api';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { api, ApiError, type Employee, type MealPeriod, type Session, type Transaction } from './api';
 import PaymentCode from './PaymentCode';
+import SelfService from './SelfService';
+import { useEmployeeNavigation, type EmployeePage } from './employeeNavigation';
+import { useEmployeeSession } from './employeeSession';
 import { useConsumptionModes } from './modes';
 import { Brand, Login, PasswordChange, messageFor } from './Auth';
 import { Icon, type IconName } from './icons';
 
 const A = '/assets/ui/';
-type Page = 'home' | 'qr' | 'ledger' | 'profile';
+type Page = EmployeePage;
 type LedgerState = { phase: 'idle' | 'loading' | 'ready' | 'error'; items: Transaction[]; cursor: string | null; message: string };
 const initialLedger: LedgerState = { phase: 'idle', items: [], cursor: null, message: '' };
 type MealState = { phase: 'idle' | 'loading' | 'ready' | 'error'; items: MealPeriod[]; message: string };
@@ -85,7 +88,7 @@ function Home({ employee, balance, ledger, meals, setPage, refresh, refreshMeals
       <div className="balance-bottom"><Status status={employee.account_status}/><button type="button" onClick={onRechargeInfo}>线下充值说明 <Icon name="arrow" size={18}/></button></div>
     </section>
     {modes.payment_code && <button className="qr-entry" type="button" onClick={() => setPage('qr')}><span className="qr-entry-icon"><Icon name="qr" size={34}/></span><span><strong>出示就餐码</strong><small>扫码后完成餐费消费</small></span><span className="entry-arrow"><Icon name="arrow"/></span></button>}
-    {modes.self_service && <a className="qr-entry" href="/self-service"><span className="qr-entry-icon"><Icon name="wallet" size={34}/></span><span><strong>自助消费</strong><small>手机确认后从账户扣款</small></span><span className="entry-arrow"><Icon name="arrow"/></span></a>}
+    {modes.self_service && <button className="qr-entry" type="button" onClick={() => setPage('self-service')}><span className="qr-entry-icon"><Icon name="wallet" size={34}/></span><span><strong>自助消费</strong><small>手机确认后从账户扣款</small></span><span className="entry-arrow"><Icon name="arrow"/></span></button>}
     {!anyEntrance && <section className="surface meal-section"><div className="section-heading"><h2>消费入口暂未开放</h2></div><p className="subtle">食堂当前没有开放的消费模式，请联系管理员。</p></section>}
     <div className="quick-links"><button type="button" onClick={() => setPage('ledger')}><span className="quick-icon mint"><Icon name="list" size={28}/></span><strong>资金流水</strong><small>查看余额变化</small></button><button type="button" onClick={() => setPage('profile')}><span className="quick-icon blue"><Icon name="person" size={28}/></span><strong>个人信息</strong><small>查看员工档案</small></button></div>
     <section className="surface meal-section"><div className="section-heading"><h2>今日餐次</h2><span>以食堂实际供应为准</span></div>
@@ -109,78 +112,65 @@ function Profile({ employee, onChangePassword, onLogout, busy }: { employee: Emp
 }
 
 export default function App() {
-  const [session, setSession] = useState<Session | null>(() => readSession());
+  const { session, setSession, expire, isCurrent } = useEmployeeSession();
+  const { page, navigate } = useEmployeeNavigation();
   const [employee, setEmployee] = useState<Employee | null>(null);
   const [account, setAccount] = useState<{ balance: number; status: string } | null>(null);
-  const [booting, setBooting] = useState(!!readSession());
+  const [profileToken, setProfileToken] = useState('');
+  const [booting, setBooting] = useState(!!session);
   const [bootError, setBootError] = useState('');
   const [forced, setForced] = useState(false);
-  const [changing, setChanging] = useState(false);
-  const [page, setPage] = useState<Page>('home');
   const [ledger, setLedger] = useState<LedgerState>(initialLedger);
   const [meals, setMeals] = useState<MealState>(initialMeals);
-  const [rechargeInfo, setRechargeInfo] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
-  const sessionRef = useRef(session);
-  sessionRef.current = session;
-
-  const expire = useCallback(() => {
-    clearSession(); setSession(null); setEmployee(null); setAccount(null); setLedger(initialLedger); setMeals(initialMeals); setForced(false); setChanging(false); setBooting(false); setPage('home');
-  }, []);
 
   const loadProfile = useCallback(async (current: Session) => {
     setBooting(true); setBootError('');
     try {
       const me = await api.me(current);
-      if (sessionRef.current?.access_token !== current.access_token) return;
+      if (!isCurrent(current)) return;
       if (me.must_change_password) { setForced(true); setEmployee(null); setAccount(null); return; }
       const record = me as Employee;
       const funds = await api.account(current);
-      if (sessionRef.current?.access_token !== current.access_token) return;
-      setEmployee(record); setAccount(funds); setForced(false);
+      if (!isCurrent(current)) return;
+      setEmployee(record); setAccount(funds); setProfileToken(current.access_token); setForced(false);
     } catch (reason) {
-      if (reason instanceof ApiError && reason.status === 401) expire();
+      if (!isCurrent(current)) return;
+      if (reason instanceof ApiError && reason.status === 401) expire(current);
       else if (reason instanceof ApiError && reason.code === 'PASSWORD_CHANGE_REQUIRED') setForced(true);
       else setBootError(messageFor(reason));
-    } finally { if (sessionRef.current?.access_token === current.access_token) setBooting(false); }
-  }, [expire]);
+    } finally { if (isCurrent(current)) setBooting(false); }
+  }, [expire, isCurrent]);
 
-  useEffect(() => { if (session) void loadProfile(session); }, [session, loadProfile]);
+  useEffect(() => {
+    setEmployee(null); setAccount(null); setLedger(initialLedger); setMeals(initialMeals);
+    setForced(!!session?.must_change_password); setBootError(''); setBooting(!!session);
+    if (session) void loadProfile(session);
+  }, [session, loadProfile]);
 
   useEffect(() => {
     if (!session) return;
     const current = session;
     const checkSession = () => {
       if (document.visibilityState !== 'visible') return;
-      if (Date.parse(current.expires_at) <= Date.now()) { expire(); return; }
+      if (!isCurrent(current)) return;
+      if (Date.parse(current.expires_at) <= Date.now()) { expire(current); return; }
       void api.me(current).then(me => {
-        if (sessionRef.current?.access_token === current.access_token && me.must_change_password) setForced(true);
+        if (isCurrent(current) && me.must_change_password) setForced(true);
       }).catch(reason => {
         if (reason instanceof ApiError && reason.status === 401 &&
-            sessionRef.current?.access_token === current.access_token) expire();
+            isCurrent(current)) expire(current);
       });
     };
     const timer = window.setInterval(checkSession, 30_000);
     document.addEventListener('visibilitychange', checkSession);
-    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', checkSession); };
-  }, [session, expire]);
-
-  // Employee authentication is shared by tabs. A logout or a later login in
-  // another tab must replace this tab's local state as well as its bearer
-  // token, otherwise the UI could continue showing stale employee data.
-  useEffect(() => {
-    const reconcile = (event: StorageEvent) => {
-      if (event.key !== null && event.key !== EMPLOYEE_SESSION_KEY) return;
-      const next = readSession();
-      if (next?.access_token === sessionRef.current?.access_token) return;
-      if (!next) { expire(); return; }
-      setSession(next);
-      setEmployee(null); setAccount(null); setLedger(initialLedger); setMeals(initialMeals);
-      setForced(next.must_change_password); setChanging(false); setBooting(true); setPage('home');
+    window.addEventListener('pageshow', checkSession);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', checkSession);
+      window.removeEventListener('pageshow', checkSession);
     };
-    window.addEventListener('storage', reconcile);
-    return () => window.removeEventListener('storage', reconcile);
-  }, [expire]);
+  }, [session, expire, isCurrent]);
 
   const loadLedger = useCallback(async (cursor?: string) => {
     if (!session) return;
@@ -188,15 +178,15 @@ export default function App() {
     setLedger(previous => ({ ...previous, phase: 'loading', message: '', ...(cursor ? {} : { items: [], cursor: null }) }));
     try {
       const result = await api.transactions(current, cursor);
-      if (sessionRef.current?.access_token !== current.access_token) return;
+      if (!isCurrent(current)) return;
       setLedger(previous => ({ phase: 'ready', items: cursor ? [...previous.items, ...result.items] : result.items, cursor: result.next_cursor || null, message: '' }));
     } catch (reason) {
-      if (reason instanceof ApiError && reason.status === 401) { expire(); return; }
+      if (!isCurrent(current)) return;
+      if (reason instanceof ApiError && reason.status === 401) { expire(current); return; }
       if (reason instanceof ApiError && reason.code === 'PASSWORD_CHANGE_REQUIRED') { setForced(true); return; }
-      if (sessionRef.current?.access_token !== current.access_token) return;
       setLedger(previous => ({ ...previous, phase: 'error', message: messageFor(reason) }));
     }
-  }, [session, expire]);
+  }, [session, expire, isCurrent]);
 
   const loadMeals = useCallback(async () => {
     if (!session) return;
@@ -204,43 +194,45 @@ export default function App() {
     setMeals(previous => ({ ...previous, phase: 'loading', message: '' }));
     try {
       const result = await api.mealPeriods(current);
-      if (sessionRef.current?.access_token !== current.access_token) return;
+      if (!isCurrent(current)) return;
       setMeals({ phase: 'ready', items: result.meal_periods, message: '' });
     } catch (reason) {
-      if (reason instanceof ApiError && reason.status === 401) { expire(); return; }
+      if (!isCurrent(current)) return;
+      if (reason instanceof ApiError && reason.status === 401) { expire(current); return; }
       if (reason instanceof ApiError && reason.code === 'PASSWORD_CHANGE_REQUIRED') { setForced(true); return; }
-      if (sessionRef.current?.access_token !== current.access_token) return;
       setMeals(previous => ({ ...previous, phase: 'error', message: messageFor(reason) }));
     }
-  }, [session, expire]);
+  }, [session, expire, isCurrent]);
 
   useEffect(() => { if (session && employee && !forced) void loadLedger(); }, [session?.access_token, employee?.id, forced]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (session && employee && !forced) void loadMeals(); }, [session?.access_token, employee?.id, forced]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const changePage = (next: Page) => {
-    setPage(next);
-    if (next === 'home' && session) { void loadProfile(session); void loadLedger(); void loadMeals(); }
-    else if (next === 'ledger') void loadLedger();
-  };
+  // Browser Back and tab clicks take the same route through the data refresh.
+  useEffect(() => {
+    if (!session || !employee || forced) return;
+    if (page === 'home') { void loadProfile(session); void loadLedger(); void loadMeals(); }
+    else if (page === 'ledger') void loadLedger();
+  }, [page]); // eslint-disable-line react-hooks/exhaustive-deps
   const logout = async () => {
     if (!session) return;
     setLogoutBusy(true);
     try { await api.logout(session); } catch { /* Clear local session even if the connection fails. */ }
-    finally { setLogoutBusy(false); expire(); }
+    finally { setLogoutBusy(false); expire(session); }
   };
 
   if (!session) return <Login onLogin={next => { setSession(next); setBooting(true); setForced(next.must_change_password); }}/ >;
-  if (booting) return <main className="simple-page"><header className="simple-header"><Brand/></header><Loading text="正在读取账户信息"/></main>;
-  if (bootError) return <main className="simple-page"><header className="simple-header"><Brand/></header><Notice title="账户信息暂不可用" action={<><button className="outline-button" type="button" onClick={() => void loadProfile(session)}>重试</button><button className="text-button" type="button" onClick={expire}>退出登录</button></>}>{bootError}</Notice></main>;
-  if (forced || changing) return <PasswordChange session={session} forced={forced} onChanged={next => { setChanging(false); setForced(next.must_change_password); setSession(next); }} onCancel={() => { if (forced) void logout(); else setChanging(false); }} onExpired={expire}/>;
+  if (booting || (profileToken !== session.access_token && !forced && !bootError)) return <main className="simple-page"><header className="simple-header"><Brand/></header><Loading text="正在读取账户信息"/></main>;
+  if (bootError) return <main className="simple-page"><header className="simple-header"><Brand/></header><Notice title="账户信息暂不可用" action={<><button className="outline-button" type="button" onClick={() => void loadProfile(session)}>重试</button><button className="text-button" type="button" onClick={() => expire(session)}>退出登录</button></>}>{bootError}</Notice></main>;
+  if (forced || page === 'password') return <PasswordChange session={session} forced={forced} onChanged={next => { if (!forced) navigate('profile'); setForced(next.must_change_password); setSession(next); }} onCancel={() => { if (forced) void logout(); else navigate('profile'); }} onExpired={() => expire(session)}/>;
   if (!employee || !account) return <main className="simple-page"><Loading text="正在读取账户信息"/></main>;
 
   return <div className="app-shell"><main className="app-main">
-    {page === 'home' && <Home employee={employee} balance={account.balance} ledger={ledger} meals={meals} setPage={changePage} refresh={() => void loadLedger()} refreshMeals={() => void loadMeals()} onRechargeInfo={() => setRechargeInfo(true)}/>}
-    {page === 'qr' && <PaymentCode session={session} employee={employee} onExpired={expire} onForced={() => setForced(true)}/>}
+    {(page === 'home' || page === 'recharge') && <Home employee={employee} balance={account.balance} ledger={ledger} meals={meals} setPage={navigate} refresh={() => void loadLedger()} refreshMeals={() => void loadMeals()} onRechargeInfo={() => navigate('recharge')}/>}
+    {page === 'qr' && <PaymentCode key={session.access_token} session={session} employee={employee} onExpired={() => expire(session)} onForced={() => setForced(true)}/>}
+    {page === 'self-service' && <SelfService key={session.access_token} session={session} employee={employee} onExpired={() => expire(session)} onForced={() => setForced(true)}/>}
     {page === 'ledger' && <Ledger ledger={ledger} balance={account.balance} refresh={() => void loadLedger()} loadMore={() => { if (ledger.cursor) void loadLedger(ledger.cursor); }}/ >}
-    {page === 'profile' && <Profile employee={employee} onChangePassword={() => setChanging(true)} onLogout={() => void logout()} busy={logoutBusy}/>}
-  </main><BottomNav page={page} setPage={changePage}/>
-    {rechargeInfo && <div className="modal-backdrop" onClick={() => setRechargeInfo(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="recharge-title" onClick={event => event.stopPropagation()}><span className="modal-icon"><Icon name="wallet" size={30}/></span><h2 id="recharge-title">线下充值</h2><p>请联系管理员，在线下完成现金或转账收款。管理员登记充值后，余额会更新，并在资金流水中留下记录。</p><button className="primary-button full" type="button" onClick={() => setRechargeInfo(false)}>知道了</button></section></div>}
+    {page === 'profile' && <Profile employee={employee} onChangePassword={() => navigate('password')} onLogout={() => void logout()} busy={logoutBusy}/>}
+  </main><BottomNav page={page === 'recharge' ? 'home' : page} setPage={navigate}/>
+    {page === 'recharge' && <div className="modal-backdrop" onClick={() => navigate('home')}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="recharge-title" onClick={event => event.stopPropagation()}><span className="modal-icon"><Icon name="wallet" size={30}/></span><h2 id="recharge-title">线下充值</h2><p>请联系管理员，在线下完成现金或转账收款。管理员登记充值后，余额会更新，并在资金流水中留下记录。</p><button className="primary-button full" type="button" onClick={() => navigate('home')}>知道了</button></section></div>}
   </div>;
 }

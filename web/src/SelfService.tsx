@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, ApiError, clearLastSelfServiceIntent, clearSession, EMPLOYEE_SESSION_KEY, readLastSelfServiceIntent, readSession, saveLastSelfServiceIntent,
+import { api, ApiError, clearLastSelfServiceIntent, readLastSelfServiceIntent, saveLastSelfServiceIntent,
   type ConsumptionResult, type Employee, type SelfServiceOutcome, type SelfServicePreview, type Session } from './api';
-import { Login, PasswordChange, Brand, messageFor } from './Auth';
+import { messageFor } from './Auth';
 
 const A = '/assets/ui/';
 
@@ -23,62 +23,11 @@ function existingLabel(count: number): string | null {
 
 type Phase = 'loading' | 'ready' | 'unavailable' | 'error';
 
-export default function SelfService() {
-  const [session, setSession] = useState<Session | null>(() => readSession());
-  const [employee, setEmployee] = useState<Employee | null>(null);
-  const [forced, setForced] = useState(false);
-  const [booting, setBooting] = useState(!!readSession());
-
-  const expire = useCallback(() => {
-    clearSession(); setSession(null); setEmployee(null); setForced(false); setBooting(false);
-  }, []);
-
-  // Loading the profile happens before the page operation so a first-login
-  // employee is sent through the forced password change first, then returns here.
-  useEffect(() => {
-    if (!session) return;
-    let cancelled = false;
-    setBooting(true);
-    void api.me(session).then(me => {
-      if (cancelled) return;
-      if (me.must_change_password) { setForced(true); setEmployee(null); return; }
-      setEmployee(me as Employee); setForced(false);
-    }).catch(reason => {
-      if (cancelled) return;
-      if (reason instanceof ApiError && reason.status === 401) expire();
-      else if (reason instanceof ApiError && reason.code === 'PASSWORD_CHANGE_REQUIRED') setForced(true);
-    }).finally(() => { if (!cancelled) setBooting(false); });
-    return () => { cancelled = true; };
-  }, [session?.access_token, expire]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // The fixed link is commonly opened in a second tab. Keep this page aligned
-  // with login, logout, expiry, and session replacement performed elsewhere in
-  // the same browser origin.
-  useEffect(() => {
-    const reconcile = (event: StorageEvent) => {
-      if (event.key !== null && event.key !== EMPLOYEE_SESSION_KEY) return;
-      const next = readSession();
-      if (next?.access_token === session?.access_token) return;
-      if (!next) { expire(); return; }
-      setSession(next); setEmployee(null); setForced(next.must_change_password); setBooting(true);
-    };
-    window.addEventListener('storage', reconcile);
-    return () => window.removeEventListener('storage', reconcile);
-  }, [session?.access_token, expire]);
-
-  if (!session) return <Login onLogin={next => { setSession(next); setBooting(true); setForced(next.must_change_password); }}/>;
-  if (booting) return <main className="simple-page"><header className="simple-header"><Brand/></header><Loading text="正在读取账户信息"/></main>;
-  if (forced) return <PasswordChange session={session} forced onChanged={next => { setSession(next); setForced(next.must_change_password); }} onCancel={expire} onExpired={expire}/>;
-  if (!employee) return <main className="simple-page"><Loading text="正在读取账户信息"/></main>;
-
-  return <SelfServicePage session={session} employee={employee} onExpired={expire} onForced={() => setForced(true)}/>;
-}
-
 function Loading({ text }: { text: string }) {
   return <div className="state-box" role="status"><span className="loading-ring"/><p>{text}</p></div>;
 }
 
-function SelfServicePage({ session, employee, onExpired, onForced }: {
+export default function SelfService({ session, employee, onExpired, onForced }: {
   session: Session; employee: Employee; onExpired: () => void; onForced: () => void;
 }) {
   const [phase, setPhase] = useState<Phase>('loading');

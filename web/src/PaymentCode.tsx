@@ -143,7 +143,9 @@ export default function PaymentCode({ session, employee, onExpired, onForced }: 
       if (tick >= Math.max(target, retryAt.current) && !issueBusy.current) void issue(idRef.current || undefined);
     }, 1000);
     const visible = () => {
-      if (document.visibilityState === 'visible' && statusRef.current?.state !== 'SUCCESS' && statusRef.current?.state !== 'FAILED') void syncStatus();
+      if (document.visibilityState !== 'visible') return;
+      setNow(Date.now());
+      if (statusRef.current?.state !== 'SUCCESS' && statusRef.current?.state !== 'FAILED') void syncStatus();
     };
     const storage = (event: StorageEvent) => {
       if (event.key !== paymentCacheKey(session) || !event.newValue) return;
@@ -151,11 +153,13 @@ export default function PaymentCode({ session, employee, onExpired, onForced }: 
       if (shared) apply(shared.token, shared.presentation_id, shared.status, shared.offset_ms, false);
     };
     document.addEventListener('visibilitychange', visible);
+    window.addEventListener('pageshow', visible);
     window.addEventListener('storage', storage);
     return () => {
       active.current = false;
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', visible);
+      window.removeEventListener('pageshow', visible);
       window.removeEventListener('storage', storage);
     };
   }, [session, apply, issue, syncStatus]);

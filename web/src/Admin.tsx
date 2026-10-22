@@ -3,7 +3,7 @@ import QRCode from 'qrcode';
 import { adminApi, AdminApiError, readAdminSession, saveAdminSession, type AdminAccount, type AdminEmployee, type AdminMeal, type AdminSession, type AdminTransaction, type AdminTerminal, type ConsumptionModes, type SecondFactorEnrollment, type SecurityState } from './adminApi';
 import './admin.css';
 
-type Section = 'employees' | 'withdrawals' | 'imports' | 'ledger' | 'refunds' | 'reversals' | 'meals' | 'daily' | 'receipts' | 'manual-supply' | 'backups' | 'exports' | 'modes' | 'self-service-qr' | 'terminals' | 'security' | 'audit' | 'not-found';
+type Section = 'employees' | 'withdrawals' | 'imports' | 'ledger' | 'refunds' | 'reversals' | 'meals' | 'daily' | 'receipts' | 'manual-supply' | 'backups' | 'exports' | 'modes' | 'self-service-qr' | 'payment-code-qr' | 'terminals' | 'security' | 'audit' | 'not-found';
 type LoadState = { busy: boolean; error: string; data: unknown };
 const emptyLoad: LoadState = { busy: false, error: '', data: null };
 type MealDraft = AdminMeal & { price_text: string };
@@ -14,13 +14,13 @@ const sectionLabels: Record<Page, string> = {
   employees: '员工管理', withdrawals: '余额退还与关户', imports: '人员导入',
   ledger: '资金流水', refunds: '消费退款', reversals: '充值冲正', meals: '餐次配置',
   daily: '每日余额日结', receipts: '线下收款复核', 'manual-supply': '故障供餐补录', backups: '备份管理',
-  exports: '数据导出', modes: '消费模式', 'self-service-qr': '自助消费二维码', terminals: '终端与扫码事件', security: '管理员与个人安全', audit: '审计记录',
+  exports: '数据导出', modes: '消费模式', 'self-service-qr': '自助消费二维码', 'payment-code-qr': '就餐码消费二维码', terminals: '终端与扫码事件', security: '管理员与个人安全', audit: '审计记录',
 };
 const sectionPaths: Record<Page, string> = {
   employees: '/admin/employees', withdrawals: '/admin/withdrawals', imports: '/admin/imports',
   ledger: '/admin/ledger', refunds: '/admin/refunds', reversals: '/admin/reversals', meals: '/admin/meals',
   daily: '/admin/daily', receipts: '/admin/receipts', 'manual-supply': '/admin/manual-supply', backups: '/admin/backups',
-  exports: '/admin/exports', modes: '/admin/consumption-modes', 'self-service-qr': '/admin/self-service-qr', terminals: '/admin/terminals', security: '/admin/security', audit: '/admin/audit',
+  exports: '/admin/exports', modes: '/admin/consumption-modes', 'self-service-qr': '/admin/self-service-qr', 'payment-code-qr': '/admin/payment-code-qr', terminals: '/admin/terminals', security: '/admin/security', audit: '/admin/audit',
 };
 const navigationGroups: { title: string; pages: Page[] }[] = [
   // The withdrawal page keeps its address but leaves the navigation: it is only
@@ -30,7 +30,7 @@ const navigationGroups: { title: string; pages: Page[] }[] = [
   { title: '资金管理', pages: ['ledger', 'refunds', 'reversals'] },
   { title: '财务核对', pages: ['daily', 'receipts'] },
   { title: '供餐管理', pages: ['meals', 'manual-supply'] },
-  { title: '系统管理', pages: ['backups', 'exports', 'modes', 'self-service-qr', 'terminals', 'security', 'audit'] },
+  { title: '系统管理', pages: ['backups', 'exports', 'modes', 'self-service-qr', 'payment-code-qr', 'terminals', 'security', 'audit'] },
 ];
 
 function sectionFromPath(pathname: string): Section {
@@ -235,7 +235,7 @@ function isPrivateIPv4(hostname: string): boolean {
     (octets[0] === 169 && octets[1] === 254);
 }
 
-function selfServiceAddressWarning(address: string): string {
+function entranceAddressWarning(address: string): string {
   let parsed: URL;
   try { parsed = new URL(address); } catch { return ''; }
   const hostname = parsed.hostname.toLowerCase();
@@ -245,15 +245,27 @@ function selfServiceAddressWarning(address: string): string {
   return '';
 }
 
-function SelfServiceQRCode() {
-  const defaultLink = `${window.location.origin}/self-service`;
+function ConsumptionQRCode({ mode }: { mode: keyof ConsumptionModes }) {
+  const content = {
+    self_service: {
+      path: '/self-service', title: '员工自助消费', linkLabel: '自助消费链接',
+      instruction: '扫码进入自助消费，登录后查看当前餐次和金额，确认无误后点击确认扣款。',
+      note: '打开页面和查看预览不会扣款，只有员工明确点击确认扣款才会产生消费。',
+    },
+    payment_code: {
+      path: '/payment-code', title: '员工就餐码消费', linkLabel: '就餐码链接',
+      instruction: '扫码直接进入就餐码页面，登录后出示动态就餐码，由食堂终端扫码消费。',
+      note: '此二维码用于打开就餐码页面，不能用于终端核销。员工需出示页面中的动态就餐码，打开页面不会扣款。',
+    },
+  }[mode];
+  const defaultLink = `${window.location.origin}${content.path}`;
   const [link, setLink] = useState(defaultLink);
   const [draftLink, setDraftLink] = useState(defaultLink);
   const [qrData, setQrData] = useState('');
   const [error, setError] = useState('');
   const [linkError, setLinkError] = useState('');
   const [notice, setNotice] = useState('');
-  const warning = selfServiceAddressWarning(link);
+  const warning = entranceAddressWarning(link);
 
   useEffect(() => {
     let cancelled = false;
@@ -283,7 +295,7 @@ function SelfServiceQRCode() {
   async function copyLink() {
     try {
       await navigator.clipboard.writeText(link);
-      setNotice('自助消费链接已复制。');
+      setNotice(`${content.linkLabel}已复制。`);
     } catch {
       setNotice('浏览器未允许自动复制，请选中下方链接手动复制。');
     }
@@ -292,35 +304,35 @@ function SelfServiceQRCode() {
   function downloadQR() {
     if (!qrData) return;
     const anchor = document.createElement('a');
-    anchor.href = qrData; anchor.download = 'self-service-qr.png'; anchor.click();
+    anchor.href = qrData; anchor.download = `${content.path.slice(1)}-qr.png`; anchor.click();
     setNotice('二维码已下载。');
   }
 
-  return <div className="self-service-qr-page">
-    {warning && <div className="admin-alert warn self-service-qr-warning" role="alert">{warning}</div>}
-    <div className="self-service-qr-layout">
-      <section className="self-service-qr-print-card">
-        <p className="self-service-qr-brand">食堂储值卡</p>
-        <h3>员工自助消费</h3>
-        {qrData ? <img className="self-service-qr-image" src={qrData} alt="固定自助消费链接二维码"/> : <div className="self-service-qr-placeholder" role="status">{error || '正在生成二维码…'}</div>}
-        <p className="self-service-qr-url">{link}</p>
-        <p className="self-service-qr-instruction">扫码进入自助消费，登录后查看当前餐次和金额，确认无误后点击确认扣款。</p>
+  return <div className="consumption-qr-page">
+    {warning && <div className="admin-alert warn consumption-qr-warning" role="alert">{warning}</div>}
+    <div className="consumption-qr-layout">
+      <section className="consumption-qr-print-card">
+        <p className="consumption-qr-brand">食堂储值卡</p>
+        <h3>{content.title}</h3>
+        {qrData ? <img className="consumption-qr-image" src={qrData} alt={`固定${content.linkLabel}二维码`}/> : <div className="consumption-qr-placeholder" role="status">{error || '正在生成二维码…'}</div>}
+        <p className="consumption-qr-url">{link}</p>
+        <p className="consumption-qr-instruction">{content.instruction}</p>
       </section>
-      <section className="self-service-qr-details">
+      <section className="consumption-qr-details">
         <h3>固定链接</h3>
         <p className="admin-muted">所有员工共用同一个入口。二维码只编码当前站点地址，不携带任何员工身份或消费数据。</p>
-        <form className="self-service-qr-link-form" onSubmit={regenerate}>
-          <label className="self-service-qr-link-field">完整地址<input type="url" required value={draftLink} onChange={event => { setDraftLink(event.target.value); setLinkError(''); }} onFocus={event => event.currentTarget.select()} placeholder="https://canteen.example.com/self-service"/></label>
+        <form className="consumption-qr-link-form" onSubmit={regenerate}>
+          <label className="consumption-qr-link-field">完整地址<input type="url" required value={draftLink} onChange={event => { setDraftLink(event.target.value); setLinkError(''); }} onFocus={event => event.currentTarget.select()} placeholder={`https://canteen.example.com${content.path}`}/></label>
           <button className="admin-primary" type="submit">重新生成二维码</button>
         </form>
         {linkError && <div className="admin-alert error" role="alert">{linkError}</div>}
-        <div className="admin-inline-actions self-service-qr-actions">
+        <div className="admin-inline-actions consumption-qr-actions">
           <button className="admin-primary" type="button" onClick={() => void copyLink()}>复制链接</button>
           <button className="admin-secondary" type="button" onClick={downloadQR} disabled={!qrData}>下载二维码</button>
           <button className="admin-secondary" type="button" onClick={() => window.print()}>打印二维码</button>
         </div>
         {notice && <p className="admin-muted" role="status">{notice}</p>}
-        <div className="admin-note self-service-qr-note"><h3>使用提醒</h3><ul><li>请先确认上方地址能被员工手机访问，再打印或张贴。</li><li>员工扫码后如未登录，会在同一页面完成登录；首次使用临时密码还需先修改密码。</li><li>打开页面和查看预览不会扣款，只有员工明确点击确认扣款才会产生消费。</li></ul></div>
+        <div className="admin-note consumption-qr-note"><h3>使用提醒</h3><ul><li>请先确认上方地址能被员工手机访问，再打印或张贴。</li><li>员工扫码后如未登录，会在同一页面完成登录；首次使用临时密码还需先修改密码。</li><li>{content.note}</li></ul></div>
       </section>
     </div>
   </div>;
@@ -510,7 +522,7 @@ function AdminConsole({ session, onSession, initialState, onInitialStateConsumed
           daily: `/api/admin/reconciliation/daily?business_date=${encodeURIComponent(businessDate)}`,
           audit: '/api/admin/audit-events',
         };
-        if (section === 'imports' || section === 'ledger' || section === 'refunds' || section === 'reversals' || section === 'exports' || section === 'receipts' || section === 'manual-supply' || section === 'backups' || section === 'self-service-qr' || section === 'not-found') {
+        if (section === 'imports' || section === 'ledger' || section === 'refunds' || section === 'reversals' || section === 'exports' || section === 'receipts' || section === 'manual-supply' || section === 'backups' || section === 'self-service-qr' || section === 'payment-code-qr' || section === 'not-found') {
           data = null;
         } else if (paths[section]) data = await adminApi.generic<unknown>(session, paths[section]!);
       }
@@ -588,7 +600,8 @@ function AdminConsole({ session, onSession, initialState, onInitialStateConsumed
           {state.error && <ErrorBox retry={() => void load()}>{state.error}</ErrorBox>}{state.busy && !state.data ? <Loading/> : modes ? <ConsumptionModeForm modes={modes} busy={busy} onSubmit={next => runAction(async () => { const saved = await adminApi.updateConsumptionModes(session, next); setModes(saved); }, '消费模式已更新，立即生效。')}/> : null}
           <div className="admin-note"><h3>关闭入口时会发生什么</h3><ul><li>该入口已展示但尚未确认的扫码请求、自助消费意图会被终止，不会扣款。</li><li>重新开启后需要员工重新发起消费。</li><li>已完成的消费、历史流水查询和退款不受影响。</li></ul></div>
         </Panel>}
-        {section === 'self-service-qr' && <Panel title="固定自助消费二维码" description="把当前访问地址生成二维码，员工扫码后进入固定的自助消费入口。二维码不包含员工身份、餐次、金额或消费凭据。"><SelfServiceQRCode/></Panel>}
+        {section === 'self-service-qr' && <Panel title="固定自助消费二维码" description="把当前访问地址生成二维码，员工扫码后进入固定的自助消费入口。二维码不包含员工身份、餐次、金额或消费凭据。"><ConsumptionQRCode key="self_service" mode="self_service"/></Panel>}
+        {section === 'payment-code-qr' && <Panel title="固定就餐码消费二维码" description="生成就餐码页面的固定入口二维码，员工扫码后直接进入就餐码页面。二维码不包含员工身份、餐次、金额或消费凭据。"><ConsumptionQRCode key="payment_code" mode="payment_code"/></Panel>}
         {section === 'security' && <>
           <SelfSecurityPanel session={session} security={security} busy={busy} onNotice={setNotice} onExpired={expire}/>
           <AdministratorPanel session={session} me={me} accounts={accounts} busy={busy} onNotice={setNotice} onChanged={() => void load()}/>

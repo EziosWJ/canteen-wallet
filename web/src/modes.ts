@@ -28,7 +28,12 @@ export function useConsumptionModes(): ConsumptionModes {
     load();
     const onVisible = () => { if (document.visibilityState === 'visible') load(); };
     document.addEventListener('visibilitychange', onVisible);
-    return () => { active.current = false; document.removeEventListener('visibilitychange', onVisible); };
+    window.addEventListener('pageshow', onVisible);
+    return () => {
+      active.current = false;
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', onVisible);
+    };
   }, [load]);
 
   return modes;
