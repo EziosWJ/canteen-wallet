@@ -2,22 +2,22 @@
 Description=Canteen Wallet Go Server
 After=network-online.target local-fs.target
 Wants=network-online.target
-RequiresMountsFor=/var/lib/canteen /mnt/canteen-backup
 
 [Service]
 Type=simple
 User=canteen
 Group=canteen
-EnvironmentFile=/etc/canteen/canteen.env
-ExecStart=/opt/canteen/canteen-server
-Restart=always
+WorkingDirectory=/opt/canteen-wallet
+EnvironmentFile=/opt/canteen-wallet/canteen.env
+ExecStart=/opt/canteen-wallet/canteen-server
+Restart=on-failure
 RestartSec=3
-StateDirectory=canteen
+TimeoutStopSec=15
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/canteen /mnt/canteen-backup
+ReadWritePaths=/opt/canteen-wallet/data /opt/canteen-wallet/backups
 PrivateTmp=yes
 
 [Install]
